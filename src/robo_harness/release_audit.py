@@ -1,6 +1,7 @@
 """Fail-closed source-tree hygiene checks; never prints matching secret values."""
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -14,6 +15,12 @@ PATTERNS = {
 }
 ALLOWED_SUFFIXES = {".py", ".md", ".toml", ".yaml", ".yml", ".txt", ".example"}
 ALLOWED_NAMES = {"LICENSE", ".gitignore", "MANIFEST.in"}
+# Only reviewed documentation images are allowed, not arbitrary binary artifacts.
+# Replacing an image requires a new content review and checksum update.
+APPROVED_ASSETS = {
+    "assets/logo.png": "e40e0e5a55a742e84807323b25be375f91deb350b7573cdf3b09583257f405ed",
+    "assets/perception-tools.png": "f14005565f00888b923ba200806078cb8bf4c8961857dfbda348cfb958272430",
+}
 GENERATED_PARTS = {".git", "__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist"}
 
 
@@ -29,6 +36,11 @@ def audit(root):
         files += 1
         if any(p in GENERATED_PARTS or p.endswith(".egg-info") for p in relative.parts):
             findings.append({"file": str(relative), "rule": "generated_or_repository_metadata"})
+            continue
+        approved_hash = APPROVED_ASSETS.get(relative.as_posix())
+        if approved_hash is not None:
+            if hashlib.sha256(path.read_bytes()).hexdigest() != approved_hash:
+                findings.append({"file": str(relative), "rule": "unreviewed_asset_content"})
             continue
         if path.name not in ALLOWED_NAMES and path.suffix not in ALLOWED_SUFFIXES:
             findings.append({"file": str(relative), "rule": "unexpected_file_type"})
