@@ -18,8 +18,11 @@ ALLOWED_NAMES = {"LICENSE", ".gitignore", "MANIFEST.in"}
 # Only reviewed documentation images are allowed, not arbitrary binary artifacts.
 # Replacing an image requires a new content review and checksum update.
 APPROVED_ASSETS = {
+    "assets/frontier-results.png": "e594ab27321726f0067c7d1ec028c388b860ac05822193d781e8a64cd1b95a3b",
+    "assets/learning-curves.png": "6bc34f2f56c46945443a3f5b27bc07d1448fa805357ed23ca5e5a69eba2a5aa2",
     "assets/logo.png": "e40e0e5a55a742e84807323b25be375f91deb350b7573cdf3b09583257f405ed",
     "assets/perception-tools.png": "f14005565f00888b923ba200806078cb8bf4c8961857dfbda348cfb958272430",
+    "assets/robosuite-transfer.png": "c9291ba41b3e9b7cb1a736bacbddef9dbe4fb9bff6cf0ab8cce9015c044bea32",
 }
 GENERATED_PARTS = {".git", "__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist"}
 

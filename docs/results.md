@@ -102,7 +102,7 @@ Counts below preserve the full denominators. All four listed policies have compl
 | π0.5 | 3 | 1 / 43 · 2.3% | 2 / 43 · 4.7% | 0 / 36 · 0.0% |
 | π0.5 | 5 | 3 / 43 · 7.0% | 3 / 43 · 7.0% | 0 / 36 · 0.0% |
 
-The README reports the common epoch-5 comparison, rather than selecting each model's best epoch independently. k1's B result peaks at epoch 3, so improvement is not monotonic. There is no matched untrained-model row on this entire 122-case evaluation, and the five C successes cover four held-out conditions, not five new skills.
+The README plots checkpoint learning curves, rather than selecting each model's best epoch independently. K1's B result peaks at epoch 3, so improvement is not monotonic. There is no matched untrained-model row on this entire 122-case evaluation, and the five C successes cover four held-out conditions, not five new skills.
 
 The paper additionally evaluates a custom Qwen continuous-action regression baseline. Its RGB-D epoch-5 run completes all 122 cases with zero successes. Some RGB-only groups are incomplete; unrun cases are not counted as failures. This is a result for that particular training recipe, not evidence that continuous-action policies in general cannot learn these tasks.
 

@@ -1,12 +1,11 @@
 <p align="center">
-  <img src="assets/logo.png" width="250" alt="robo-harness k1: a robot riding a horse with perception and measurement tools">
+  <img src="assets/logo.png" width="250" alt="Robo-Harness K1 logo">
 </p>
 
-<h1 align="center">robo-harness k1</h1>
+<h1 align="center">Robo-Harness K1</h1>
 
 <p align="center">
-  <strong>Harnessing Robot-Use Agents via Perception Augmentation</strong><br>
-  Give vision-language models tools to measure, remember, and act.
+  <strong>Harnessing Robot-Use Agents via Perception Augmentation</strong>
 </p>
 
 <p align="center">
@@ -20,69 +19,47 @@
 
 ---
 
-**robo-harness k1** turns a vision-language model into a robot-use agent: the model observes the scene, requests measurements, chooses an action, and checks what actually happened. Rather than asking the model to infer metric geometry from RGB alone, k1 exposes calibrated perception and robot control through a common tool interface.
+**Robo-Harness K1** turns a vision-language model into a robot-use agent: the model observes the scene, requests measurements, chooses an action, and checks what actually happened. Rather than asking the model to infer metric geometry from RGB alone, K1 exposes calibrated perception and robot control through a common tool interface.
 
 This release supports **LIBERO-Pro** and **RoboSuite**, with optional interfaces for distilling successful tool-use trajectories into a smaller VLM. It contains code, configuration templates, documentation, selected paper illustrations, and synthetic tests—not datasets, model weights, episode recordings, credentials, or third-party simulator source code.
 
 ## Results
 
-Selected results from the accompanying paper. **Success means the native simulator success criterion**, not the model's declaration of completion. Counts and comparison conditions are included below; see [evaluation details](docs/results.md) for the full tables and limitations.
+Figures from the paper. Accuracy uses the native simulator success criterion. See [evaluation details](docs/results.md) for protocols and comparison scope.
 
-### Perception-augmented frontier agents
+### LIBERO-Pro
 
-On the **same 18 LIBERO-Pro task–variant–state configurations**:
+<p align="center">
+  <img src="assets/frontier-results.png" width="1000" alt="LIBERO-Pro accuracy: Robo-Harness K1 with GPT-6 Astra 88.9%, with Gemini 3.7 Flash 77.8%, and RGB-only GPT-6 Astra 61.1%; published references shown separately">
+</p>
 
-| Model | Interface | Successful episodes | Success rate |
-|:---|:---|---:|---:|
-| GPT-6 Astra | RGB-only robot-use interface | 11 / 18 | 61.1% |
-| Gemini 3.7 Flash | **k1** | 14 / 18 | 77.8% |
-| GPT-6 Astra | **k1** | **16 / 18** | **88.9%** |
+The top three rows use matched task configurations. Hatched bars are published references with different evaluation protocols, not matched reruns. Gemini + K1 achieves **77.2%** on the full evaluation; the figure shows its matched-subset result.
 
-For Astra, replacing the RGB-only interface with k1 improves success by **27.8 percentage points** on this small matched subset. This is a comparison of complete interfaces, not an isolated depth-tool ablation.
+### RoboSuite
 
-The larger **Gemini + k1 evaluation succeeds in 139 / 180 episodes (77.2%)**: 30 base tasks across Spatial, Object, and Goal; two perturbations (`swap`, `task`); three initial states. The 14 / 18 Gemini result above is a subset of those 180 episodes, not an additional independent evaluation.
+<p align="center">
+  <img src="assets/robosuite-transfer.png" width="1000" alt="RoboSuite nut assembly with external and wrist camera observations across approach, regrasp, lifting, and alignment">
+</p>
 
-### Transfer across robot arms
+Gemini + K1 transfers without target-environment fine-tuning: **90.0%** on Panda, **88.8%** on UR5e, and **86.2%** on IIWA across the shared tasks. All arms use PandaGripper. [Transfer settings →](docs/results.md#robosuite-transfer)
 
-**Gemini + k1, without target-environment fine-tuning**, on four shared RoboSuite tasks: cube lifting, restacking, stacking, and nut assembly. Each task has 20 trials per arm.
+### Agentic post-training
 
-| Panda | UR5e | IIWA |
-|:---:|:---:|:---:|
-| **90.0%** · 72 / 80 | **88.8%** · 71 / 80 | **86.2%** · 69 / 80 |
+<p align="center">
+  <img src="assets/learning-curves.png" width="1000" alt="Learning curves comparing Qwen with K1, RGB-only Qwen, OpenVLA, π0.5, and Qwen VLA on in-domain, new-state, and held-out-condition evaluations">
+</p>
 
-All three arms use a PandaGripper and embodiment-specific adapters. This tests arm transfer, not arbitrary gripper transfer. Panda's broader seven-task evaluation, including wiping and two-arm tasks, reaches **101 / 140 (72.1%)**; [see the per-task breakdown](docs/results.md#robosuite-transfer).
-
-### Learning robot tool use from 107 episodes
-
-Models are trained from the **same pool of 107 successful teacher episodes** and evaluated at **epoch 5**:
-
-| Model / policy | A: Trained task & state<br>43 episodes | B: New state, trained condition<br>43 episodes | C: Held-out conditions<br>36 episodes |
-|:---|---:|---:|---:|
-| **Qwen3.5-9B + k1** | **51.2%** | **44.2%** | **13.9%** |
-| Qwen3.5-9B RGB-only robot-use agent | 7.0% | 4.7% | 0.0% |
-| OpenVLA-7B | 20.9% | 30.2% | 0.0% |
-| π0.5 | 7.0% | 7.0% | 0.0% |
-
-Group B is the fixed **development set**. Group C holds out 12 task–variant conditions from fine-tuning, with three initial states each; these are not necessarily 12 distinct manipulation skills. The systems share source episodes, but differ in observations, action interfaces, and supervision. These are results under this training recipe, not a general ranking of VLMs and VLAs. [Split definitions and learning curves →](docs/results.md#learning-from-tool-use-trajectories)
+Models share the same source demonstration pool. B is the new-state development set; C contains fine-tuning-held-out task conditions, not necessarily distinct new skills. [Split definitions →](docs/results.md#learning-from-tool-use-trajectories)
 
 ## How it works
 
 <p align="center">
-  <img src="assets/perception-tools.png" width="1000" alt="Four k1 perception tools: region grounding, depth and local geometry, persistent anchor tracking, and projected grasp candidates">
+  <img src="assets/perception-tools.png" width="1000" alt="K1 perception tools: region grounding, depth and local geometry, persistent anchor tracking, and projected grasp candidates">
 </p>
 
 <p align="center"><em>Tool outputs stay grounded in the existing camera views: labeled regions, metric geometry, tracked anchors, and grasp-pose schematics.</em></p>
 
 **Observe → measure → act → verify.** The model remains responsible for selecting targets and deciding what to do next. Tools provide evidence and execution primitives—not task-specific solution scripts.
-
-| Component | What the agent gets |
-|:---|:---|
-| **Ground & measure** | Segmentation-backed regions, calibrated RGB-D measurements, and local geometric estimates. |
-| **Track & remember** | Persistent region identities, tracked visual anchors, and overlays on existing cameras. |
-| **Inspect grasp hypotheses** | Projected gripper schematics with neutral candidate IDs. Heuristic scores select/order candidates internally but are not shown to the model. |
-| **Move & verify** | Relative corrections, absolute-position servo execution, pose/rotation updates, gripper control, and measured execution feedback. |
-| **Maintain progress** | Configurable recent text history (`N=8`), previous image history (`K=1`), full episode archives, history retrieval, and model-maintained milestones. |
-| **Change the backend** | Environment adapters, optional simultaneous multi-effector control, and image/tool-capable OpenAI-compatible model endpoints. |
 
 A grasp hypothesis is **not** a collision-free path or a guarantee of a successful grasp. See [architecture and execution semantics](docs/architecture.md) for tool behavior, coordinate conventions, and limitations.
 
@@ -142,7 +119,7 @@ All data and base weights must be supplied locally by the user. No training is s
 - [Validation scope](docs/validation.md)
 - [中文使用说明](docs/usage_zh.md)
 
-The algorithm name is **robo-harness k1**. The Python module is `robo_harness`, the distribution is `robo-harness-k1`, and the command is `robo-harness`.
+The algorithm name is **Robo-Harness K1**. The Python module is `robo_harness`, the distribution is `robo-harness-k1`, and the command is `robo-harness`.
 
 ## Source validation
 

@@ -1,5 +1,6 @@
 include README.md LICENSE SECURITY.md THIRD_PARTY_NOTICES.md .gitignore .env.example
 include assets/logo.png assets/perception-tools.png
+include assets/frontier-results.png assets/learning-curves.png assets/robosuite-transfer.png
 recursive-include src *.py
 include configs/libero-pro.yaml configs/robosuite.yaml configs/grasp-provider.example.yaml
 recursive-include docs *.md
