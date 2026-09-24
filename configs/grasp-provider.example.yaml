@@ -1,0 +1,9 @@
+# Optional value for harness.grasp_provider, NOT an automatically loaded profile.
+# Calibrate these conventions for your actual provider and gripper before use.
+backend: graspgen
+endpoint: tcp://127.0.0.1:5555
+provider_axes:
+  approach: [0, 0, 1]
+  closing: [1, 0, 0]
+  lateral: [0, -1, 0]
+contact_reference_local_m: [0, 0, 0]

@@ -1,0 +1,13 @@
+include README.md LICENSE SECURITY.md THIRD_PARTY_NOTICES.md .gitignore .env.example
+recursive-include src *.py
+include configs/libero-pro.yaml configs/robosuite.yaml configs/grasp-provider.example.yaml
+recursive-include docs *.md
+recursive-include tests *.py
+global-exclude *.pyc *.pyo
+prune outputs
+prune data
+prune datasets
+prune checkpoints
+prune external
+prune .git
+prune .venv

@@ -1,0 +1,16 @@
+environment:
+  name: robosuite
+  task: cube_lifting
+  robot: Panda
+  seed: 0
+  horizon: 1500
+harness:
+  max_calls: 400
+  history_rounds: 8
+  history_image_rounds: 1
+  delta_axis: 0.03
+  region_tools: true
+  tracking_backend: tapnext
+  tracking_device: cuda:0
+  completion_feedback: true
+  interaction_feedback: false

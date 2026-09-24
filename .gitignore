@@ -1,0 +1,39 @@
+# Credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*credentials*
+config.local.*
+configs/*.local.*
+**/*.local/
+.ssh/
+# User-provided inputs and generated artifacts
+data/
+datasets/
+checkpoints/
+external/
+outputs/
+runs/
+wandb/
+*.pt
+*.pth
+*.safetensors
+*.hdf5
+*.h5
+*.npz
+*.npy
+*.mp4
+*.jsonl
+# Build and interpreter artifacts
+.venv*/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+.DS_Store

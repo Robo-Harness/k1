@@ -1,0 +1,21 @@
+environment:
+  name: libero-pro
+  suite: libero_spatial_swap
+  task_id: 0
+  initial_state: 0
+  horizon: 2400
+  resolution: 384
+  instruction_source: environment
+harness:
+  max_calls: 400
+  history_rounds: 8
+  history_image_rounds: 1
+  delta_axis: 0.03
+  move_toward_max_steps: 120
+  move_toward_stall_steps: 24
+  move_toward_tolerance_m: 0.003
+  region_tools: true
+  tracking_backend: tapnext
+  tracking_device: cuda:0
+  completion_feedback: true
+  interaction_feedback: false
