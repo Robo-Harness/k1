@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://arxiv.org/abs/2609.29389">Paper (arXiv)</a> ·
   <a href="#results">Results</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#quick-start">Quick start</a> ·
