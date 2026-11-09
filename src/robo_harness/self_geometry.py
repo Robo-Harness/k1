@@ -1,7 +1,7 @@
 """Robot-only self masking for sparse RGB-D queries, never an action guard.
 
 Adapters supply convex parts in world coordinates. No object segmentation, scene
-poses or native contacts are accepted. Absent geometry uses conservative fallback behavior.
+poses or native contacts are accepted. Absent geometry preserves legacy behavior.
 Private geometry lives in camera observations, not in model-facing text.
 """
 

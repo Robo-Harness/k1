@@ -58,9 +58,13 @@ def test_manager_resets_on_reinitialization_and_marks_lost_unknown():
         },
     }
     m = InteractionEvidence()
+    from robo_harness.observation_contract import camera_reference
+
+    entry["track_sensor_snapshot_id"] = camera_reference(obs, "cam")["snapshot_id"]
     m.update({"S1": entry}, obs)
     assert m.context()["S1"]["status"] == "unknown"
     obs["frame_id"] = entry["frame"] = 12
+    entry["track_sensor_snapshot_id"] = camera_reference(obs, "cam")["snapshot_id"]
     m.update({"S1": entry}, obs)
     assert m.context()["S1"]["matched_anchor_count"] == 3
     replacement = dict(entry)

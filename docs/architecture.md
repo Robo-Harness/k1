@@ -2,7 +2,7 @@
 
 ## Decision loop
 
-An environment adapter supplies calibrated RGB-D observations and robot proprioception. The runtime constructs the prompt from the original task, current measurements, recent tool exchanges, previous camera images and persistent task progress. The model selects one tool. The harness executes it, records actual outcomes, refreshes observations and repeats until native success, an accepted completion request, or a budget limit.
+An environment adapter supplies calibrated RGB-D observations and robot proprioception. The runtime constructs the prompt from the original task, current measurements, recent tool exchanges, previous camera images and persistent task progress. The model selects one tool. The harness executes it, records actual outcomes, refreshes observations and repeats until the selected completion protocol stops it or a budget is exhausted. In `submission_only`, native success is evaluated by the host only after the final model call; other modes may stop on native success. See the [protocol and upgrade guide](releases/v1.1.md).
 
 Scene-object ground-truth poses, instance masks and hidden success geometry are not exported as actor observations. Evaluator code may read native success and save simulator state for reproducibility. Completion feedback can report whether a requested termination actually satisfied the native task; it does not reveal the missing target pose.
 
@@ -55,7 +55,7 @@ An optional local GraspGen service can supply learned poses from a visible metri
 ## Memory and progress
 
 - `history_rounds=N` keeps N complete recent text tool exchanges; default 8.
-- `history_image_rounds=K` includes K previous decision image sets; default 1, plus current images.
+- `history_image_rounds=K` includes K previous image sets; default 1, plus current images. `history_image_selection=decisions` retains decision-based selection; `distinct_physical_states` selects earlier physical states instead of duplicate same-state images.
 - Full completed evidence is archived regardless of the active prompt window. `search_history` and `read_history` provide retrieval, pagination and optional archived images.
 - `update_task_progress` lets the model retain milestones, evidence references, uncertainties and invalidated claims. The original task remains separately visible.
 - History images have frame/call labels and are not silently treated as current sensor evidence. Progress is model-authored, not a native success certificate.

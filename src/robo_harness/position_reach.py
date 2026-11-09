@@ -10,13 +10,18 @@ from .episode_history import nonnegative_integer
 from .motion import rotation
 from .motion_limits import axis_limit
 from .perception import finite_vector
+from .execution_contract import planner_failed
+from .completion_protocol import policy_success, native_terminated
 
 
-def reach_config(max_steps=120, stall_steps=24, tolerance_m=0.003):
+def reach_config(max_steps=120, stall_steps=24, tolerance_m=0.003, max_planner_failures=2):
     nonnegative_integer(max_steps, "move_toward_max_steps")
     nonnegative_integer(stall_steps, "move_toward_stall_steps")
     if max_steps == 0:
         raise ValueError("move_toward_max_steps must be positive")
+    nonnegative_integer(max_planner_failures, "max_consecutive_planner_failures")
+    if max_planner_failures == 0:
+        raise ValueError("max_consecutive_planner_failures must be positive")
     return {
         "max_native_steps": max_steps,
         "stall_native_steps": stall_steps,
@@ -25,6 +30,7 @@ def reach_config(max_steps=120, stall_steps=24, tolerance_m=0.003):
         "settled_native_frames": 3,
         "progress_distance_m": 0.0005,
         "progress_angle_deg": 0.5,
+        "max_consecutive_planner_failures": max_planner_failures,
     }
 
 
@@ -33,11 +39,11 @@ def reach_position(motion, obs, args, config):
     servo = getattr(adapter, "move_to_position", None)
     if not callable(servo):
         raise ValueError("Adapter does not support absolute position servo; use small-step tools")
-    unsupported = set(args).intersection({"delta_axis", "max_distance_m", "steps"})
-    if unsupported:
+    obsolete = set(args).intersection({"delta_axis", "max_distance_m", "steps"})
+    if obsolete:
         raise ValueError(
-            "move_toward reaches an absolute target; remove unsupported step-limit fields: "
-            + ", ".join(sorted(unsupported))
+            "move_toward now reaches an absolute target; unsupported obsolete step-limit fields: "
+            + ", ".join(sorted(obsolete))
         )
     arm = args["arm"]
     target = finite_vector(args["target_xyz_world_m"], 3)
@@ -58,12 +64,17 @@ def reach_position(motion, obs, args, config):
     reason = "native_step_budget"
     native_feedback = {}
     ik_failure_reported = False
+    consecutive_planner_failures = 0
+    planner_failed_commands = 0
     motion._record(arm, state)
     while adapter.frame - begin < config["max_native_steps"]:
         if adapter.frame >= adapter.horizon:
             reason = "episode_step_budget"
             break
-        if adapter.success():
+        if native_terminated(adapter):
+            reason = "native_episode_ended"
+            break
+        if policy_success(adapter):
             reason = "native_success"
             break
         previous_frame = adapter.frame
@@ -72,6 +83,13 @@ def reach_position(motion, obs, args, config):
         ik_failure_reported |= native_feedback.get("status") == "ik_failure"
         current = adapter.observe()
         after = current["arms"][arm]
+        rejected = planner_failed(native_feedback)
+        planner_failed_commands += int(rejected)
+        # Explicit planner rejection is NOT a slow servo tick. Physics settling,
+        # jaw motion or the other arm's successful hold must not reset it.
+        # Returning control neither cancels the jaw target nor forbids a new
+        # actor-requested retry. Unknown/non-planned controllers keep servoing.
+        consecutive_planner_failures = consecutive_planner_failures + 1 if rejected else 0
         distance = float(np.linalg.norm(target - after["xyz_world_m"]))
         angle = float(np.degrees((orientation * rotation(after).inv()).magnitude()))
         motion._record(arm, after)
@@ -86,11 +104,19 @@ def reach_position(motion, obs, args, config):
         if settled >= config["settled_native_frames"]:
             reason = "target_reached"
             break
-        if adapter.success():
+        if native_terminated(adapter):
+            reason = "native_episode_ended"
+            break
+        if policy_success(adapter):
             reason = "native_success"
             break
         if adapter.frame >= adapter.horizon:
             reason = "episode_step_budget"
+            break
+        if not within and consecutive_planner_failures >= config.get(
+            "max_consecutive_planner_failures", 2
+        ):
+            reason = "native_planner_failed"
             break
         if (
             progress_distance - distance >= config["progress_distance_m"]
@@ -125,10 +151,16 @@ def reach_position(motion, obs, args, config):
         "position_within_tolerance": distance <= config["position_tolerance_m"],
         "stop_reason": reason,
         "native_steps": int(adapter.frame) - begin,
+        "native_step_unit": native_feedback.get("execution_contract", {}).get(
+            "command_unit", "adapter_step"
+        ),
+        "remaining_native_steps": max(0, int(adapter.horizon) - int(adapter.frame)),
         "start_frame_id": begin,
         "frame_id": int(adapter.frame),
         "execution_limits": dict(config),
         "native_ik_failure_reported": ik_failure_reported,
+        "planner_failed_commands": planner_failed_commands,
+        "consecutive_planner_failures": consecutive_planner_failures,
         "native_last_step_diagnostic": native_feedback,
         "meaning": "Measured robot arrival only, not object/task success. No IK feasibility or collision-free path certificate. "
         "A stall ends this call, not future retries; reobserve and choose the next action.",

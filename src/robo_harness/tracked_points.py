@@ -5,6 +5,7 @@ import numpy as np
 
 from .geometry import unproject
 from .perception import FeatureTracker
+from .observation_contract import camera_reference
 
 
 class TrackedPoints:
@@ -28,6 +29,7 @@ class TrackedPoints:
             "origin": np.array(point["xyz_world_m"]),
             "last_xyz": np.array(point["xyz_world_m"]),
             "last_frame": obs["frame_id"],
+            "sensor_reference": camera_reference(obs, camera),
             "lost": False,
             "latest": {
                 "id": point["id"],
@@ -68,6 +70,10 @@ class TrackedPoints:
         for key, entry in self.entries.items():
             frame = obs["frame_id"]
             if frame == entry["last_frame"]:
+                if not entry["lost"] and entry["sensor_reference"] != camera_reference(
+                    obs, entry["camera"]
+                ):
+                    self.invalidate([key], "sensor_changed_without_frame_advance", frame)
                 continue
             entry["last_frame"] = frame
             base = {
@@ -87,6 +93,7 @@ class TrackedPoints:
                 continue
             try:
                 camera = obs["vision"][entry["camera"]]
+                reference = camera_reference(obs, entry["camera"])
                 tracked = entry["tracker"].update(camera["color"], frame)
                 if not tracked["visible"][0] or tracked["needs_revalidation"][0]:
                     raise ValueError("correspondence_lost_or_frame_gap")
@@ -102,10 +109,12 @@ class TrackedPoints:
                     raise ValueError("world_jump_revalidation_required")
                 delta = xyz - entry["origin"]
                 entry["last_xyz"] = xyz
+                entry["sensor_reference"] = reference
                 entry["latest"] = {
                     **base,
                     "pixel": measured["pixel"],
                     "xyz_world_m": xyz.tolist(),
+                    "sensor_reference": reference,
                     "status": "tracked_estimate",
                     "world_displacement_m": delta.tolist(),
                     "world_distance_m": float(np.linalg.norm(delta)),
@@ -115,6 +124,9 @@ class TrackedPoints:
                     "meaning": "Same-feature estimate relative to initialization; camera pose compensated. Drift/identity switches remain possible; not verified object motion.",
                 }
             except (ValueError, KeyError, RuntimeError, cv2.error) as error:
+                from .resource_errors import raise_if_infrastructure_error
+
+                raise_if_infrastructure_error(error)
                 entry["lost"] = True
                 entry["loss_reason"] = str(error)
                 entry["latest"] = {
@@ -131,7 +143,11 @@ class TrackedPoints:
             if isinstance(value, list):
                 return [compact(v) for v in value]
             if isinstance(value, dict):
-                return {k: compact(v) for k, v in value.items() if k != "meaning"}
+                return {
+                    k: compact(v)
+                    for k, v in value.items()
+                    if k not in ("meaning", "sensor_reference")
+                }
             return value
 
         result = []

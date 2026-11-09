@@ -15,6 +15,14 @@ def calibration(camera):
         raise ValueError("Invalid calibrated camera")
     if min(k[0, 0], k[1, 1]) <= 1:
         raise ValueError("Invalid focal length")
+    if not np.allclose(k[2], [0, 0, 1], atol=1e-6, rtol=0):
+        raise ValueError("Intrinsic matrix must use the optical pinhole convention")
+    if (
+        not np.allclose(t[3], [0, 0, 0, 1], atol=1e-6, rtol=0)
+        or not np.allclose(t[:3, :3].T @ t[:3, :3], np.eye(3), atol=1e-3, rtol=0)
+        or not np.isclose(np.linalg.det(t[:3, :3]), 1.0, atol=1e-3, rtol=0)
+    ):
+        raise ValueError("Camera-to-world must be a rigid right-handed optical transform")
     return k, t
 
 

@@ -10,7 +10,10 @@ PATTERNS = {
     "credential": re.compile(r"(?:sk-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|ghp_[A-Za-z0-9]{20,})"),
     "private_key": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     "embedded_auth": re.compile(r"https?://[^\s/]+:[^\s/]+@"),
-    "private_absolute_path": re.compile(r"(?<!\w)/(?:mnt|home|Users|root)/[^\s\"']+"),
+    "private_absolute_path": re.compile(r"(?<!\w)/(?:mnt|home|root|[A-Z][A-Za-z0-9_-]*)/[^\s\"']+"),
+    "internal_version": re.compile(
+        r"\b(?:[rR][4-9][_.]\d+(?:[_.]\d+)?|[vV]8[_.]\d+(?:[_.]\d+)?)\b"
+    ),
     "nonlocal_ipv4": re.compile(r"\b(?!(?:127\.0\.0\.1|0\.0\.0\.0)\b)(?:\d{1,3}\.){3}\d{1,3}\b"),
 }
 ALLOWED_SUFFIXES = {".py", ".md", ".toml", ".yaml", ".yml", ".txt", ".example"}

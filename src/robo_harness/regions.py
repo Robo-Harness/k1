@@ -1,6 +1,7 @@
 """Observed RGB-D regions only: no simulator imports, hidden geometry, or new views."""
 
 import os
+import sys
 from copy import deepcopy
 from functools import lru_cache
 
@@ -9,13 +10,28 @@ import numpy as np
 
 from .geometry import calibration
 from .perception import FeatureTracker, pixel_points
+from .observation_contract import camera_reference, validate_reference
+from .deployment_config import path as deployment_path, DeploymentError
 
 
 @lru_cache(maxsize=2)
 def segmenter(device):
-    import torch
-    from sam3.model.sam3_image_processor import Sam3Processor
-    from sam3.model_builder import build_sam3_image_model
+    checkpoint = deployment_path("sam3_checkpoint")
+    if not checkpoint.is_file():
+        raise DeploymentError("SAM3 checkpoint unavailable; configure ROBO_HARNESS_SAM3_CHECKPOINT")
+    repo = deployment_path("sam3_repo", required=False)
+    if repo is not None:
+        if not (repo / "sam3/model_builder.py").is_file():
+            raise DeploymentError("SAM3 source unavailable; check ROBO_HARNESS_SAM3_REPO")
+        sys.path.insert(0, str(repo))
+    try:
+        import torch
+        from sam3.model.sam3_image_processor import Sam3Processor
+        from sam3.model_builder import build_sam3_image_model
+    except (ImportError, OSError) as exc:
+        raise DeploymentError(
+            "SAM3 dependency import failed; repair the configured perception environment"
+        ) from exc
 
     torch.set_num_threads(6)
     if "cuda" in device:
@@ -23,13 +39,14 @@ def segmenter(device):
     model = (
         build_sam3_image_model(
             enable_inst_interactivity=True,
-            checkpoint_path=os.environ.get("ROBO_HARNESS_SAM3_CHECKPOINT", "./checkpoints/sam3.pt"),
+            checkpoint_path=str(checkpoint),
             load_from_HF=False,
         )
         .to(device)
         .eval()
     )
-    # Disable optional compiled hole filling on this instance for portability.
+    # Avoid requiring the optional Triton hole-fill extension. This affects only
+    # the harness-owned instance; it does not modify the external installation.
     model.inst_interactive_predictor._transforms.max_hole_area = 0
     return model, Sam3Processor(model, device=device, confidence_threshold=0.0)
 
@@ -52,6 +69,49 @@ def segment(rgb, box, device):
     return mask, float(np.max(scores))
 
 
+class SegmentationMatches(list):
+    """Accepted masks plus explicitly unverified image-space fallback proposals."""
+
+    def __init__(self, accepted, reason, unverified_boxes):
+        super().__init__(accepted)
+        self.reason = reason
+        self.unverified_boxes = unverified_boxes
+
+
+def select_text_matches(masks, scores):
+    masks, scores = np.asarray(masks), np.asarray(scores, dtype=float)
+    if masks.ndim != 3 or scores.shape != (len(masks),) or masks.dtype != bool:
+        raise ValueError("Invalid segmentation mask/score shapes")
+    if not np.isfinite(scores).all() or np.any((scores < 0) | (scores > 1)):
+        raise ValueError("Invalid segmentation scores")
+    selected, proposals = [], []
+    for i in np.argsort(-scores, kind="stable"):
+        if masks[i].sum() < 20:
+            continue
+        if scores[i] < 0.5:
+            # Do not relax the metric-region threshold or auto-create an S ID.
+            # A bounded shortlist is only a visual hint for explicit reinspection.
+            if scores[i] >= 0.1 and len(proposals) < 3:
+                v, u = np.where(masks[i])
+                proposals.append(
+                    dict(
+                        box_pixels=[int(u.min()), int(v.min()), int(u.max() + 1), int(v.max() + 1)],
+                        model_score=float(scores[i]),
+                        identity_verified=False,
+                        metric_geometry_available=False,
+                    )
+                )
+            continue
+        if any((masks[i] & m).sum() / max(1, (masks[i] | m).sum()) > 0.5 for m, _ in selected):
+            continue
+        if len(selected) < 4:
+            selected.append((masks[i], float(scores[i])))
+    reason = "matched" if selected else "below_threshold" if proposals else "no_match"
+    if len(masks) and not any(m.sum() >= 20 for m in masks):
+        reason = "empty_mask"
+    return SegmentationMatches(selected, reason, [] if selected else proposals)
+
+
 def segment_text(rgb, query, device):
     import torch
     from PIL import Image
@@ -65,19 +125,12 @@ def segment_text(rgb, query, device):
         result = processor.set_text_prompt(state=state, prompt=query)
     scores = result["scores"].detach().float().cpu().numpy().reshape(-1)
     masks = result["masks"].detach().cpu().numpy().reshape(-1, *rgb.shape[:2]) > 0
-    selected = []
-    for i in np.argsort(-scores):
-        if scores[i] < 0.5 or masks[i].sum() < 20:
-            continue
-        if any((masks[i] & m).sum() / max(1, (masks[i] | m).sum()) > 0.5 for m, _ in selected):
-            continue
-        selected.append((masks[i], float(scores[i])))
-        if len(selected) == 4:
-            break
-    return selected
+    return select_text_matches(masks, scores)
 
 
 def cloud(camera, mask):
+    if "depth" not in camera:
+        raise ValueError("Metric geometry unavailable: no measured depth")
     depth = np.asarray(camera["depth"]).squeeze()
     valid = mask & np.isfinite(depth) & (depth > 0) & (depth < 10)
     # Erode boundary to reduce foreground/background contamination.
@@ -150,6 +203,7 @@ class Regions:
         self.find_cache_frame = None
 
     def inspect(self, args, obs):
+        reference = validate_reference(args, obs)
         camera = args["camera"]
         rgb = obs["vision"][camera]["color"]
         roi = args.get("roi")
@@ -159,6 +213,8 @@ class Regions:
         box = corners.flatten()
         if np.any(corners[1] <= corners[0]):
             raise ValueError("ROI must be [left,top,right,bottom]")
+        if np.any(corners < 0) or np.any(corners > reference["original_size_wh"]):
+            raise ValueError("ROI outside original image; do not use crop or panel coordinates")
         mask, score = segment(rgb, box, self.device)
         return self.store(
             {
@@ -167,6 +223,7 @@ class Regions:
                     "method": "bbox_prompt",
                     "input_box_pixels": box.tolist(),
                     "label_used_for_segmentation": False,
+                    "sensor_reference": reference,
                 },
             },
             obs,
@@ -175,18 +232,36 @@ class Regions:
         )
 
     def find(self, args, obs):
+        include_proposals = args.get("include_unverified_boxes", False)
+        if type(include_proposals) is not bool:
+            raise ValueError("include_unverified_boxes must be boolean")
+
+        def present(result):
+            result = deepcopy(result)
+            result["unverified_proposals_available"] = bool(result["unverified_boxes"])
+            if not include_proposals:
+                result["unverified_boxes"] = []
+            elif result["unverified_boxes"]:
+                result["meaning"] += (
+                    " Requested unverified boxes are low-score image proposals, not identities or S regions. "
+                    "Scores are not correctness probabilities. Verify against original RGB; all may be wrong. "
+                    "No XYZ inferred. Explicit inspect_region can refine a chosen box."
+                )
+            return result
+
+        reference = validate_reference(args, obs)
         frame = obs["frame_id"]
         if self.find_cache_frame != frame:
             self.find_cache.clear()
             self.find_cache_frame = frame
-        cache_key = (args["camera"], args["query"])
+        cache_key = (args["camera"], args["query"], reference["snapshot_id"])
         if cache_key in self.find_cache:
             result = deepcopy(self.find_cache[cache_key])
             result["measurement_reused"] = True
             result["meaning"] += (
-                " Same frame/query: no new sensor evidence. Reuse IDs or deliberately choose a different view/region."
+                " Same sensor snapshot/query: no new sensor evidence. Reuse IDs or deliberately choose a different view/region."
             )
-            return result
+            return present(result)
         masks = segment_text(obs["vision"][args["camera"]]["color"], args["query"], self.device)
         results = [
             self.store(
@@ -197,6 +272,7 @@ class Regions:
                         "method": "text_prompt",
                         "query": args["query"],
                         "label_used_for_segmentation": True,
+                        "sensor_reference": reference,
                     },
                 },
                 obs,
@@ -207,16 +283,24 @@ class Regions:
         ]
         result = {
             "candidates": results,
+            "sensor_reference": reference,
+            "measurement_reused": False,
+            "found": bool(results),
+            "reason": getattr(masks, "reason", "matched" if results else "no_accepted_mask"),
+            "unverified_boxes": deepcopy(getattr(masks, "unverified_boxes", [])),
             "meaning": "Candidates are unordered semantic hypotheses. Select intended S ID by current contours and spatial relations, not score or numbering. No candidate means unknown, not absence.",
         }
         self.find_cache[cache_key] = deepcopy(result)
-        return result
+        return present(result)
 
     def store(self, args, obs, mask, score):
         # Explicit reinspection changes the region registry, invalidating cached receipts.
         self.find_cache.clear()
         camera = args["camera"]
         rgb = obs["vision"][camera]["color"]
+        mask = np.asarray(mask)
+        if mask.dtype != bool or mask.shape != rgb.shape[:2] or not mask.any():
+            raise ValueError("Expected a nonempty boolean mask aligned to the original RGB image")
         geometry_error = None
         try:
             stats, xyz, uv = geometry(obs["vision"][camera], mask)
@@ -257,11 +341,13 @@ class Regions:
             "tracker": tracker,
             "anchor_uv": uv[indices],
             "track": initial,
+            "track_sensor_snapshot_id": camera_reference(obs, camera)["snapshot_id"],
             "box": np.array([u.min(), v.min(), u.max(), v.max()], float),
             "stats": stats,
             "score": score,
             "lost": False,
             "last_refresh": obs["frame_id"],
+            "sensor_snapshot_id": camera_reference(obs, camera)["snapshot_id"],
             "geometry_error": geometry_error,
             "provenance": deepcopy(args.get("provenance", {"method": "provided_mask"})),
             "reinspections": history,
@@ -277,9 +363,14 @@ class Regions:
                 continue
             frame = obs["frame_id"]
             camera = obs["vision"][entry["camera"]]
+            snapshot = camera_reference(obs, entry["camera"])["snapshot_id"]
+            if frame == entry["frame"] and snapshot != entry.get("track_sensor_snapshot_id"):
+                entry.update(lost=True, reason="sensor_changed_without_frame_advance")
+                continue
             if frame != entry["frame"]:
                 entry["track"] = entry["tracker"].update(camera["color"], frame)
                 entry["frame"] = frame
+                entry["track_sensor_snapshot_id"] = snapshot
             track = entry["track"]
             valid = np.asarray(track["visible"]) & ~np.asarray(track["needs_revalidation"])
             if valid.sum() < max(3, len(valid) // 2):
@@ -311,9 +402,13 @@ class Regions:
                     stats=stats,
                     xyz=xyz,
                     last_refresh=frame,
+                    sensor_snapshot_id=camera_reference(obs, entry["camera"])["snapshot_id"],
                     geometry_error=error,
                 )
             except (ValueError, RuntimeError) as error:
+                from .resource_errors import raise_if_infrastructure_error
+
+                raise_if_infrastructure_error(error)
                 entry.update(lost=True, reason=str(error))
 
     def summary(self, key, obs):
@@ -338,11 +433,17 @@ class Regions:
             ],
             "revision": len(entry.get("reinspections", [])),
         }
-        if entry["lost"] or entry["last_refresh"] != obs["frame_id"]:
+        snapshot_changed = (
+            entry.get("sensor_snapshot_id") != camera_reference(obs, entry["camera"])["snapshot_id"]
+        )
+        if entry["lost"] or entry["last_refresh"] != obs["frame_id"] or snapshot_changed:
             return {
                 **base,
                 "status": "unknown_reinspect",
-                "reason": entry.get("reason", "geometry_not_current"),
+                "reason": entry.get(
+                    "reason",
+                    "sensor_snapshot_changed" if snapshot_changed else "geometry_not_current",
+                ),
                 "historical_measurement": {
                     "frame_id": entry["last_refresh"],
                     "surface_reference_world_m": entry["stats"]["surface_reference_world_m"]
@@ -542,7 +643,16 @@ class Regions:
             schema(
                 "find_regions",
                 "Find visible candidate regions by a short object/part noun phrase using SAM3 on CURRENT original RGB, then return measured RGB-D geometry. Prefer this when pixel grounding is uncertain. Multiple matching parts receive S IDs: choose the intended one from labeled ORIGINAL view; score/order is not task identity.",
-                {"frame_id": fid, "camera": camera, "query": text},
+                {
+                    "frame_id": fid,
+                    "camera": camera,
+                    "query": text,
+                    "include_unverified_boxes": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Opt in to low-score image proposals if no mask is accepted. Default false to avoid speculative clutter. All proposals may be wrong, especially under occlusion; no S IDs or metric geometry are inferred.",
+                    },
+                },
                 ["frame_id", "camera", "query"],
             ),
             schema(

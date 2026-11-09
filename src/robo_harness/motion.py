@@ -160,6 +160,57 @@ class MotionController:
             "recorded_waypoints": {a: len(v) for a, v in self.paths.items()},
         }
 
+    def reanchor_after_external_motion(self, obs, arms=None):
+        """Resume saved WORLD orientations at measured post-motion TCP positions.
+
+        For intentional motion outside ``move`` / ``move_toward`` (e.g. a mobile
+        base or torso). Do not call after ordinary orientation drift: that would
+        remove the position-holding correction of successive rotation chunks.
+        This changes neither a saved quaternion nor its ID, executes no action,
+        and does not reinterpret the archived pre-motion observations.
+        """
+        selected = set(obs["arms"] if arms is None else arms)
+        affected = {goal["arm"] for goal in self.goals.values()} & selected
+        if not affected:
+            return None
+        # Validate all affected measurements before mutating any live goal.
+        measured = {
+            arm: (finite_vector(obs["arms"][arm]["xyz_world_m"], 3), rotation(obs["arms"][arm]))
+            for arm in affected
+        }
+        frame = obs["frame_id"]
+        counts = defaultdict(int)
+        for goal_id, goal in self.goals.items():
+            arm = goal["arm"]
+            if arm not in measured:
+                continue
+            xyz, current_rotation = measured[arm]
+            goal["xyz"] = xyz.copy()
+            counts[arm] += 1
+            visible = self.last_goal.get(arm)
+            if visible is not None and visible.get("goal_id") == goal_id:
+                visible.update(
+                    anchor_xyz_world_m=xyz.tolist(),
+                    anchor_position_error_m=0.0,
+                    remaining_degrees=float(
+                        np.degrees((goal["rotation"] * current_rotation.inv()).magnitude())
+                    ),
+                )
+        return {
+            "frame_id": frame,
+            "arms": {
+                arm: {
+                    "updated_goal_count": counts[arm],
+                    "anchor_xyz_world_m": measured[arm][0].tolist(),
+                }
+                for arm in sorted(measured)
+            },
+            "meaning": "Saved world orientation targets and IDs are unchanged. "
+            "Their position anchors now use measured post-body-motion TCP positions; "
+            "resuming rotation will not undo that deliberate body translation. "
+            "This is a reference update, not target arrival or an extra robot action.",
+        }
+
     def _pose(self, state):
         return {"xyz": np.asarray(state["xyz_world_m"], float).copy(), "rotation": rotation(state)}
 

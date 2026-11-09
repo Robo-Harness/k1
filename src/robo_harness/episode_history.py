@@ -17,6 +17,12 @@ def nonnegative_integer(value, name):
     return value
 
 
+def validate_image_history_selection(value):
+    if value not in ("decisions", "distinct_physical_states"):
+        raise ValueError("history_image_selection must be decisions or distinct_physical_states")
+    return value
+
+
 class EpisodeHistory:
     def __init__(self, output):
         self.output = Path(output)
@@ -172,10 +178,36 @@ class EpisodeHistory:
             )
         return blocks
 
-    def recent_image_blocks(self, k, current_frame):
+    def recent_image_call_ids(self, k, current_frame, selection="decisions"):
+        """Select history without modifying the complete episode archive.
+
+        In distinct-state mode, retain the latest completed decision BEFORE the
+        current physical frame and one camera set per earlier frame. Repeated
+        perception-only calls cannot displace the pre-motion image. Frame IDs
+        are observation identities, not durations or ground-truth scene state.
+        """
         nonnegative_integer(k, "history_image_rounds")
+        nonnegative_integer(current_frame, "current_frame")
+        validate_image_history_selection(selection)
+        if not k:
+            return []
+        if selection == "decisions":
+            return [r["call_id"] for r in self.records[-k:]]
+        chosen, seen = [], set()
+        for record in reversed(self.records):
+            frame = record["frame_id"]
+            if frame >= current_frame or frame in seen:
+                continue
+            chosen.append(record["call_id"])
+            seen.add(frame)
+            if len(chosen) == k:
+                break
+        return list(reversed(chosen))
+
+    def recent_image_blocks(self, k, current_frame, selection="decisions"):
         blocks = []
-        for record in self.records[max(0, len(self.records) - k) :] if k else []:
+        for call_id in self.recent_image_call_ids(k, current_frame, selection):
+            record = self.records[call_id]
             # Only each decision's original current camera images. Never recursively
             # re-add older history panels or crops that were included in that input.
             arms = {

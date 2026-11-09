@@ -10,11 +10,15 @@ import importlib
 import types
 from pathlib import Path
 import numpy as np
+from .completion_protocol import policy_success
 from scipy.spatial.transform import Rotation
 from .robosuite_tasks import TASKS, sha
 from robo_harness.perception import execution_report, finite_vector
 from robo_harness.motion_limits import validate_transport_delta
 from robo_harness.self_geometry import RobotSelfGeometry
+from .in_process_execution import native_step, motion_entry, close
+from .gripper_signals import mujoco_gripper_measurement
+from .tool_surface import mujoco_passive_surface
 
 
 def controller_config(joint=False):
@@ -306,12 +310,17 @@ class RobosuiteAdapter:
                 "gripper_opening_m": opening,
                 "gripper_limits_m": limits,
                 "gripper_command_open": self.grippers[name],
+                "gripper_command_mode": "directional" if gripper.dof else "none",
+                "gripper_measurement": mujoco_gripper_measurement(sim, gripper),
                 "geometry": geometry,
                 "joint_positions_rad": np.asarray(
                     sim.data.qpos[robot._ref_joint_pos_indexes]
                 ).tolist(),
                 "gripper_actuated": bool(gripper.dof),
             }
+            surface = mujoco_passive_surface(sim, gripper, tcp, rot)
+            if surface is not None:
+                arms[name]["tool_surface"] = surface
         for cam in vision.values():
             cam["_robot_self_parts"] = self_parts
         self._cached = {
@@ -331,6 +340,7 @@ class RobosuiteAdapter:
         }
         return self._cached
 
+    @native_step
     def _native(self, command):
         self.raw, *_ = self.env.step(np.asarray(command))
         self.env.sim.forward()
@@ -339,6 +349,7 @@ class RobosuiteAdapter:
         if self.on_step:
             self.on_step(self.observe(), command)
 
+    @motion_entry
     def move(self, arm, delta, rotation_deg=(0, 0, 0), gripper=None, steps=8):
         state = self.observe()["arms"][arm]
         delta = validate_transport_delta(delta, self.delta_axis)
@@ -351,6 +362,7 @@ class RobosuiteAdapter:
         ).as_quat()
         return self.move_to_position(arm, target, q, gripper, steps)
 
+    @motion_entry
     def move_to_position(
         self, arm, target_xyz_world_m, target_quaternion_xyzw, gripper=None, steps=1
     ):
@@ -367,6 +379,7 @@ class RobosuiteAdapter:
         )
         return result["arms"][arm]
 
+    @motion_entry
     def move_effectors(self, targets, steps=12):
         if self.joint:
             raise ValueError("Cartesian tools unavailable in joint-policy mode")
@@ -376,6 +389,7 @@ class RobosuiteAdapter:
         goals = {}
         starts = {}
         seen = set()
+        grippers = self.grippers.copy()
         for arm, state in obs["arms"].items():
             starts[arm] = np.asarray(state["xyz_world_m"])
             goals[arm] = (starts[arm].copy(), Rotation.from_quat(state["quaternion_xyzw"]))
@@ -393,7 +407,8 @@ class RobosuiteAdapter:
             if grip is not None:
                 if not np.isfinite(grip) or not 0 <= grip <= 1:
                     raise ValueError("gripper: 0 closed,1 open")
-                self.grippers[arm] = float(grip)
+                grippers[arm] = float(grip)
+        self.grippers = grippers
         for _ in range(min(steps, self.horizon - self.frame)):
             sim = self.env.sim
             command = []
@@ -411,7 +426,7 @@ class RobosuiteAdapter:
                     part = np.r_[part, 1 - 2 * self.grippers[arm]]
                 command.extend(part)
             self._native(command)
-            if self.success():
+            if policy_success(self):
                 break
         now = self.observe()
         reports = {}
@@ -427,6 +442,7 @@ class RobosuiteAdapter:
         self._cached = None
         return self.last_feedback
 
+    @motion_entry
     def joint_action(self, target, gripper):
         if not self.joint or self.narms != 1:
             raise ValueError("Requires single-arm joint policy")
@@ -444,4 +460,4 @@ class RobosuiteAdapter:
         return bool(self.wrapper.task_completed())
 
     def close(self):
-        self.env.close()
+        close(self)

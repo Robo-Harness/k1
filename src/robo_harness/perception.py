@@ -7,6 +7,7 @@ optional and loaded read-only. References distinguish estimates from identity.
 from __future__ import annotations
 
 import os
+import hashlib
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -15,6 +16,8 @@ import cv2
 import numpy as np
 
 from .geometry import calibration, unproject
+from .observation_contract import camera_reference
+from .roi import rectangle, schema as roi_schema, receipt as roi_receipt
 
 
 def finite_vector(value, size):
@@ -50,13 +53,11 @@ def fit_geometry(camera, roi, kind="plane", threshold_m=0.003):
     """Robust plane or PCA axis from a caller-selected current RGB-D rectangle."""
     if kind not in ("plane", "axis"):
         raise ValueError("Geometry kind must be plane or axis")
-    x0, y0, x1, y1 = finite_vector(roi, 4).astype(int)
     if "depth" not in camera:
         raise ValueError("Metric geometry unavailable: this observation has no measured depth")
     depth = np.asarray(camera["depth"]).squeeze()
     h, w = depth.shape
-    if not (0 <= x0 < x1 <= w and 0 <= y0 < y1 <= h):
-        raise ValueError("ROI must be a nonempty original-image rectangle")
+    x0, y0, x1, y1 = rectangle(roi, depth.shape)
     if not 0 < threshold_m <= 0.02:
         raise ValueError("Plane threshold must be in (0, 0.02] m")
     k, t = calibration(camera)
@@ -100,6 +101,8 @@ def fit_geometry(camera, roi, kind="plane", threshold_m=0.003):
         "inlier_fraction": float(inliers.mean()),
         "singular_values": s.tolist(),
         "roi": [int(x) for x in (x0, y0, x1, y1)],
+        "roi_pixels": roi_receipt([x0, y0, x1, y1]),
+        "direction_sign_ambiguous": True,
         "meaning": "Geometry of selected visible surfaces; semantic identity and physical extent unverified",
     }
     if kind == "plane":
@@ -182,7 +185,14 @@ def execution_report(start, target, actual, ik_failures=0):
 @lru_cache(maxsize=2)
 def _load_tapnext(repo, checkpoint, device):
     sys.path.insert(0, str(repo))
-    from tapnet.tapnextpp.votsp2026.model import TAPNextPP
+    try:
+        from tapnet.tapnextpp.votsp2026.model import TAPNextPP
+    except (ImportError, OSError) as exc:
+        from .deployment_config import DeploymentError
+
+        raise DeploymentError(
+            "TAPNext dependency import failed; repair the configured perception environment"
+        ) from exc
 
     return TAPNextPP.from_checkpoint(checkpoint, device=device)
 
@@ -194,20 +204,12 @@ class FeatureTracker:
         self.backend, self.device = backend, device
         self.model = None
         if backend == "tapnext":
-            repo = Path(
-                os.environ.get(
-                    "ROBO_HARNESS_TAPNEXT_REPO",
-                    "./external/tapnextpp",
-                )
-            )
-            checkpoint = Path(
-                os.environ.get(
-                    "ROBO_HARNESS_TAPNEXT_CHECKPOINT",
-                    "./checkpoints/tapnextpp.pt",
-                )
-            )
+            from .deployment_config import path as deployment_path, DeploymentError
+
+            repo = deployment_path("tapnext_repo")
+            checkpoint = deployment_path("tapnext_checkpoint")
             if not repo.is_dir() or not checkpoint.is_file():
-                raise ValueError(
+                raise DeploymentError(
                     "TAPNext repository/checkpoint unavailable; configure explicit local paths"
                 )
             self.model = _load_tapnext(str(repo), str(checkpoint), device)
@@ -217,6 +219,8 @@ class FeatureTracker:
         self.history = []
 
     def start(self, rgb, points, frame_id):
+        if type(frame_id) is not int or frame_id < 0:
+            raise ValueError("Tracking requires a nonnegative integer frame_id")
         points = np.asarray(points, dtype=np.float32)
         h, w = rgb.shape[:2]
         self.image_size_wh = [int(w), int(h)]
@@ -229,6 +233,7 @@ class FeatureTracker:
         self.continuity_broken = np.zeros(len(points), dtype=bool)
         self.last_frame_gap = 0
         self.gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        self.image_fingerprint = hashlib.sha256(np.ascontiguousarray(rgb).tobytes()).digest()
         if self.model is not None:
             self.points, self.visible, self.state = self.model.track_frame(
                 cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), query_points_xy=points
@@ -239,9 +244,15 @@ class FeatureTracker:
         return self._result()
 
     def update(self, rgb, frame_id):
-        if self.frame is None or frame_id < self.frame:
+        if type(frame_id) is not int or self.frame is None or frame_id < self.frame:
             raise ValueError("Tracker requires initialization and monotonic frame IDs")
+        if list(rgb.shape[:2][::-1]) != self.image_size_wh:
+            raise ValueError("Tracking image size changed; initialize on the new original image")
+        fingerprint = hashlib.sha256(np.ascontiguousarray(rgb).tobytes()).digest()
         if frame_id == self.frame:
+            if fingerprint != self.image_fingerprint:
+                self.continuity_broken[:] = True
+                raise ValueError("Tracking image changed at the same frame_id; reinitialize")
             return self.history[-1]
         self.last_frame_gap = int(frame_id - self.frame)
         self.continuity_broken |= ~self.visible
@@ -279,6 +290,7 @@ class FeatureTracker:
         )
         self.continuity_broken |= ~self.visible
         self.gray, self.frame = gray, int(frame_id)
+        self.image_fingerprint = fingerprint
         return self._result()
 
     def _result(self):
@@ -311,13 +323,15 @@ class GenericTools:
         self.tracks = {}
         self.active_reference = None
 
-    def add(self, result, frame, camera=None):
+    def add(self, result, frame, camera=None, sensor_references=None):
         ref = f"G{len(self.references) + 1}"
         self.references[ref] = {**result, "id": ref, "frame_id": int(frame), "camera": camera}
+        if sensor_references is not None:
+            self.references[ref]["source_sensor_references"] = sensor_references
         self.active_reference = ref
         return self.references[ref]
 
-    def resolve(self, ref, frame, points=()):
+    def resolve(self, ref, frame, points=(), obs=None):
         result = self.references.get(ref)
         if result is None:
             result = next((p for p in points if p["id"] == ref), None)
@@ -325,6 +339,15 @@ class GenericTools:
             raise ValueError("Unknown geometry reference")
         if result["frame_id"] != frame:
             raise ValueError("Geometry reference is historical; re-measure in CURRENT frame")
+        if obs is not None:
+            references = result.get("source_sensor_references", [])
+            if result.get("sensor_reference") is not None:
+                references = [*references, result["sensor_reference"]]
+            for reference in references:
+                if camera_reference({**obs, "frame_id": frame}, reference["camera"]) != reference:
+                    raise ValueError(
+                        "Geometry source sensor snapshot changed; remeasure instead of reusing old XYZ"
+                    )
         return result
 
     def update(self, obs, frame):
@@ -337,6 +360,9 @@ class GenericTools:
                     np.asarray(obs["vision"][entry["camera"]]["color"])[..., :3], frame
                 )
             except (ValueError, KeyError, RuntimeError, cv2.error) as exc:
+                from .resource_errors import raise_if_infrastructure_error
+
+                raise_if_infrastructure_error(exc)
                 entry["failed"] = True
                 entry["latest"] = {
                     "frame_id": frame,
@@ -355,20 +381,32 @@ class GenericTools:
         if name == "fit_geometry":
             camera = args["camera"]
             return self.add(
-                fit_geometry(obs["vision"][camera], args["roi"], args["kind"]), frame, camera
+                fit_geometry(obs["vision"][camera], args["roi"], args["kind"]),
+                frame,
+                camera,
+                [camera_reference({**obs, "frame_id": frame}, camera)],
             )
         if name == "project_to_plane":
-            plane = self.resolve(args["plane_id"], frame, points)
+            plane = self.resolve(args["plane_id"], frame, points, obs)
             if plane.get("kind") != "plane":
                 raise ValueError("Reference must be a fitted plane")
             cam = obs["vision"][args["camera"]]
             uv = pixel_points(
                 [args["uv"]], np.asarray(cam["color"]).shape, args.get("coordinate_space", "pixels")
             )[0]
-            return self.add(ray_plane(cam, uv, plane), frame, args["camera"])
+            return self.add(
+                ray_plane(cam, uv, plane),
+                frame,
+                args["camera"],
+                [
+                    *plane.get("source_sensor_references", []),
+                    camera_reference({**obs, "frame_id": frame}, args["camera"]),
+                ],
+            )
         if name == "compute_relation":
             return relation(
-                self.resolve(args["a"], frame, points), self.resolve(args["b"], frame, points)
+                self.resolve(args["a"], frame, points, obs),
+                self.resolve(args["b"], frame, points, obs),
             )
         if name == "track_features":
             key = args["track_id"]
@@ -391,6 +429,10 @@ class GenericTools:
         if name == "read_track":
             entry = self.tracks[args["track_id"]]
             result = {"track_id": args["track_id"], **entry["latest"]}
+            if result["frame_id"] != frame:
+                raise ValueError(
+                    "Track is historical; update on current original camera before reading XYZ"
+                )
             # Invalid depth stays invalid; never project an occluded point onto background.
             xyz = []
             for uv, visible, revalidate in zip(
@@ -435,7 +477,7 @@ def tool_schemas(schema, cameras):
             "Fit a plane or axis to a CURRENT RGB-D ROI. No semantic identity guarantee.",
             {
                 "camera": camera,
-                "roi": array(4),
+                "roi": roi_schema(),
                 "kind": {"type": "string", "enum": ["plane", "axis"]},
             },
         ),

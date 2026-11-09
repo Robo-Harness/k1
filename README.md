@@ -24,6 +24,13 @@
 
 This release supports **LIBERO-Pro** and **RoboSuite**, with optional interfaces for distilling successful tool-use trajectories into a smaller VLM. It contains code, configuration templates, documentation, selected paper illustrations, and synthetic tests—not datasets, model weights, episode recordings, credentials, or third-party simulator source code.
 
+## News and updates
+
+- **2026-11-09 · v1.1:** More reliable measurement references and motion receipts; calibrated multi-effector control; explicit gripper uncertainty and change monitoring; configurable physical-state image history; bounded output-truncation recovery; and an explicit `submission_only` protocol that separates model completion from evaluator-only scoring. See the [upgrade guide](docs/releases/v1.1.md).
+- **v1.0 archive:** The previous main branch is preserved at [v1.0](https://github.com/Robo-Harness/k1/tree/v1.0). Use that snapshot for the original public implementation.
+
+The figures below report the published experiments, **not a new benchmark of v1.1**. Completion protocols are part of the evaluation setting and must be reported; oracle-assisted and submission-only results are not interchangeable.
+
 ## Results
 
 Figures from the paper. Accuracy uses the native simulator success criterion. See [evaluation details](docs/results.md) for protocols and comparison scope.

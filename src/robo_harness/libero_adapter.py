@@ -6,10 +6,13 @@ import types
 from pathlib import Path
 
 import numpy as np
+from .completion_protocol import policy_success
 from scipy.spatial.transform import Rotation
 
 from .perception import execution_report, finite_vector
 from .motion_limits import axis_limit, validate_transport_delta
+from .in_process_execution import native_step, motion_entry, close
+from .gripper_signals import mujoco_gripper_measurement
 
 
 def environment_instruction(env):
@@ -194,6 +197,9 @@ class LiberoAdapter:
                     "axes_world": r.tolist(),
                     "gripper_opening_m": float(np.sum(np.abs(self.raw["robot0_gripper_qpos"]))),
                     "gripper_command_open": self.gripper,
+                    "gripper_command_mode": "directional",
+                    "gripper_actuated": bool(robot.gripper.dof),
+                    "gripper_measurement": mujoco_gripper_measurement(sim, robot.gripper),
                     "gripper_limits_m": [closed_limit, open_limit],
                     "geometry": {
                         "axes_local": {
@@ -217,6 +223,7 @@ class LiberoAdapter:
             },
         }
 
+    @motion_entry
     def move(self, arm, delta, rotation_deg=(0, 0, 0), gripper=None, steps=8):
         if arm != "arm":
             raise ValueError("Unknown arm")
@@ -237,6 +244,7 @@ class LiberoAdapter:
         )
         return self._servo_absolute(target, target_r, steps)
 
+    @motion_entry
     def move_to_position(
         self, arm, target_xyz_world_m, target_quaternion_xyzw, gripper=None, steps=1
     ):
@@ -256,6 +264,13 @@ class LiberoAdapter:
             self.gripper = float(gripper)
         return self._servo_absolute(target, target_r, steps)
 
+    @native_step
+    def _native(self, command):
+        self.raw, *_ = self.env.step(command)
+        self.frame += 1
+        if self.on_step:
+            self.on_step(self.observe(), command)
+
     def _servo_absolute(self, target, target_r, steps):
         start = np.asarray(self.raw["robot0_eef_pos"]).copy()
         controller = self.env.robots[0].controller
@@ -269,11 +284,8 @@ class LiberoAdapter:
                 target_r * Rotation.from_quat(self.raw["robot0_eef_quat"]).inv()
             ).as_rotvec()
             command = np.r_[np.clip(np.r_[error, rot_error] / scale, -1, 1), 1 - 2 * self.gripper]
-            self.raw, *_ = self.env.step(command)
-            self.frame += 1
-            if self.on_step:
-                self.on_step(self.observe(), command)
-            if self.success():
+            self._native(command)
+            if policy_success(self):
                 break
         self.last_feedback = execution_report(start, target, self.raw["robot0_eef_pos"])
         self.last_feedback["rotation_residual_deg"] = float(
@@ -287,4 +299,4 @@ class LiberoAdapter:
         return bool(self.env.check_success())
 
     def close(self):
-        self.env.close()
+        close(self)

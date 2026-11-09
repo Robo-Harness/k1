@@ -63,10 +63,20 @@ def candidates(manager, region_id, arm, obs):
     local_basis = np.column_stack(
         [geom["axes_local"][n] for n in ["approach", "closing", "lateral"]]
     )
+    if (
+        local_basis.shape != (3, 3)
+        or not np.isfinite(local_basis).all()
+        or not np.allclose(local_basis.T @ local_basis, np.eye(3), atol=1e-5, rtol=0)
+    ):
+        raise ValueError("Robot semantic axes must form a calibrated orthonormal frame")
+    handedness = np.sign(np.linalg.det(local_basis))
     probes = np.asarray(geom["sweep_probes_local_m"])
     pad_midpoint = np.mean(geom["finger_pad_centers_local_m"], axis=0)
     center = np.asarray(summary["surface_reference_world_m"])
     long = np.asarray(summary["major_axis_world_unsigned"])
+    if long.shape != (3,) or not np.isfinite(long).all() or np.linalg.norm(long) < 1e-8:
+        raise ValueError("Measured long axis must be a finite nonzero direction")
+    long = long / np.linalg.norm(long)
     seed = np.eye(3)[np.argmin(abs(long))]
     a = np.cross(long, seed)
     a /= np.linalg.norm(a)
@@ -75,7 +85,10 @@ def candidates(manager, region_id, arm, obs):
     output = []
     for angle in np.arange(8) * np.pi / 4:
         approach = np.cos(angle) * a + np.sin(angle) * b
-        closing = np.cross(approach, long)
+        # Semantic A/C/L may be left- or right-handed. Both world and local
+        # bases must have the SAME handedness, so their mapping is a rotation
+        # (det +1), never a reflection. Preserve the existing LIBERO convention.
+        closing = handedness * np.cross(long, approach)
         rotation = np.column_stack([approach, closing, long]) @ local_basis.T
         flipped = np.column_stack([approach, -closing, -long]) @ local_basis.T
         current_rotation = np.asarray(state["axes_world"])

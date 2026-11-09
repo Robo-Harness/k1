@@ -10,6 +10,7 @@ import httpx
 import numpy as np
 
 from .geometry import unproject
+from .roi import rectangle as roi_rectangle, schema as roi_schema, receipt as roi_receipt
 from .motion import MotionController
 from .pose_targets import PoseTargets
 from .reference_alignment import measured_region_alignment, qualify_carry_alignment
@@ -20,15 +21,24 @@ from .grasp_backends import learned_candidates
 from .grasp_visualization import candidate_panel
 from .grasp_presentation import present_candidates
 from .interaction_evidence import InteractionEvidence
-from .gripper_evidence import GripperEvidence
+from .gripper_monitor import GripperMonitor
 from .perception import GenericTools, finite_vector, pixel_points, tool_schemas
-from .episode_history import EpisodeHistory, nonnegative_integer
+from .episode_history import EpisodeHistory, nonnegative_integer, validate_image_history_selection
 from .task_progress import TaskProgress, memory_schemas
 from .motion_limits import axis_limit
 from .position_reach import reach_config, reach_position
+from .bimanual import bimanual_guidance
+from .completion_protocol import bind_protocol, resolve_mode, policy_success, native_terminated
+from .output_budget import OutputBudget
+from .point_targets import named_schema, point_schema, resolve as resolve_point_target
+from .observation_contract import validate_reference
+
+HARNESS_VERSION = "k1-v1.1"
 
 
 def schema(name, description, properties, required):
+    if not set(required) <= set(properties):
+        raise ValueError(f"{name}: required tool parameters must be declared in properties")
     return {
         "type": "function",
         "function": {
@@ -109,6 +119,7 @@ class ToolRegistry:
         move_toward_max_steps=120,
         move_toward_stall_steps=24,
         move_toward_tolerance_m=0.003,
+        completion_mode=None,
     ):
         self.reach_config = reach_config(
             move_toward_max_steps, move_toward_stall_steps, move_toward_tolerance_m
@@ -129,18 +140,23 @@ class ToolRegistry:
         self.motion_tools = motion_tools
         self.arrival_guard = arrival_guard
         self.waypoints = {}
-        self.gripper_samples = {}
         self.grasp_provider = grasp_provider
         self.interaction_feedback = interaction_feedback
-        self.completion_feedback = completion_feedback
+        self.completion_protocol = bind_protocol(
+            adapter, resolve_mode(completion_mode, completion_feedback)
+        )
+        self.completion_feedback = self.completion_protocol.mode == "feedback"
         self.completion_checks = []
         self.interaction_evidence = InteractionEvidence()
-        self.gripper_evidence = GripperEvidence()
+        self.gripper_monitor = GripperMonitor()
         self.tracked_points = TrackedPoints(backend=tracking_backend, device=tracking_device)
         self.regions = Regions(
             device=tracking_device, backend=tracking_backend, enabled=region_tools
         )
         if hasattr(adapter, "on_step"):
+            # The core consumes every step for tracking and jaw settling. Legacy
+            # evaluator-only adapters may otherwise call back with None.
+            adapter.step_observations_required = True
             adapter.point_overlay = self.tracked_points.overlay
             previous_callback = adapter.on_step
 
@@ -154,36 +170,13 @@ class ToolRegistry:
             adapter.on_step = on_step
 
     def record_gripper(self, obs):
-        if self.interaction_feedback:
-            self.gripper_evidence.update(obs)
-        for arm, state in obs["arms"].items():
-            if "gripper_opening_m" not in state:
-                continue
-            samples = self.gripper_samples.setdefault(arm, [])
-            if not samples or samples[-1][0] != obs["frame_id"]:
-                samples.append((obs["frame_id"], float(state["gripper_opening_m"])))
-                del samples[:-32]
+        # Always-on proprioception, independent of optional visual interaction evidence.
+        # This observer has NO access to robot actuation or motion stopping.
+        self.gripper_monitor.update(obs)
 
     def gripper_context(self, obs):
-        result = {}
-        for arm, state in obs["arms"].items():
-            samples = self.gripper_samples.get(arm, [])[-3:]
-            limits = state.get("gripper_limits_m")
-            gap = state.get("gripper_opening_m")
-            settled = (
-                bool(np.ptp([p[1] for p in samples]) < 0.0005)
-                if len(samples) == 3 and samples[-1][0] - samples[0][0] == 2
-                else None
-            )
-            result[arm] = {
-                "opening_m": gap,
-                "settled_last3_native_frames": settled,
-                "near_closed_mechanical_limit": bool(gap <= limits[0] + 0.002)
-                if gap is not None and limits is not None
-                else None,
-                "meaning": "Proprioception only. Closing still in motion is not a grasp. Near closed limit suggests possibly empty/thin contact; nonzero gap does NOT prove attachment. Verify target response before continued transport/manipulation.",
-            }
-        return result
+        self.record_gripper(obs)
+        return self.gripper_monitor.context()
 
     def arrival_context(self, obs):
         return {
@@ -242,7 +235,7 @@ class ToolRegistry:
                 ),
                 schema(
                     "set_gripper",
-                    "Set opening (0 closed,1 open) while holding TCP pose. Waits up to 24 native steps for measured jaw motion to settle. Reports gap/settling, NEVER certifies attachment. Prefer this before manipulation instead of closing and immediately pulling.",
+                    "Command gripper (0 close,1 open) while holding TCP pose. Intermediate values follow the arm's gripper_command_mode, NOT a guaranteed partial jaw width: position is a normalized target, binary thresholds at 0.5, directional closes below 0.5/opens above 0.5/holds at 0.5. Waits up to 24 native steps for measured opening to settle. Reports sourced metric gap OR normalized joint position; unavailable sensors stay unknown. Neither settling nor opening certifies attachment. Events are advisory, not motion interlocks.",
                     {
                         "frame_id": fid,
                         "arm": {"type": "string", "enum": list(obs["arms"])},
@@ -263,7 +256,7 @@ class ToolRegistry:
                     {
                         "frame_id": fid,
                         "camera": camera,
-                        "roi": {"type": "array", "items": num, "minItems": 4, "maxItems": 4},
+                        "roi": roi_schema(),
                     },
                     ["frame_id", "camera", "roi"],
                 ),
@@ -288,12 +281,13 @@ class ToolRegistry:
                     {
                         "frame_id": fid,
                         "arm": {"type": "string", "enum": list(obs["arms"])},
-                        "target_xyz_world_m": vec,
+                        "target_xyz_world_m": named_schema(("x", "y", "z")),
+                        "target_point": point_schema(),
                         "gripper": {"type": "number", "minimum": 0, "maximum": 1},
                         "steps": {"type": "integer", "minimum": 1, "maximum": 12},
                         "note": text,
                     },
-                    ["frame_id", "arm", "target_xyz_world_m", "note"],
+                    ["frame_id", "arm", "note"],
                 ),
                 schema(
                     "rotate_toward",
@@ -345,14 +339,43 @@ class ToolRegistry:
                     ["frame_id", "arm", "note"],
                 ),
                 schema(
+                    "hold",
+                    "Explicitly advance native simulation while holding ALL currently measured TCP poses and preserving gripper commands. Use to let physics settle or observe time evolution; this consumes native budget. Not a grasp, stability or collision guarantee. A zero move_relative is a no-op, not waiting.",
+                    {
+                        "frame_id": fid,
+                        "steps": {"type": "integer", "minimum": 1, "maximum": 120},
+                        "note": text,
+                    },
+                    ["frame_id", "steps", "note"],
+                ),
+                schema(
+                    "read_guidance",
+                    "Read optional general guidance about interpreting grasp, handover or motion evidence. No action or native steps. Not a task-specific recipe; current observations and decisions remain yours.",
+                    {
+                        "topic": {
+                            "type": "string",
+                            "enum": ["grasp_evidence", "handover_evidence", "motion_recovery"],
+                        }
+                    },
+                    ["topic"],
+                ),
+                schema(
                     "remember",
                     "Save a short evidence-based working note; no success verification.",
                     {"key": text, "value": text},
                     ["key", "value"],
                 ),
                 schema(
+                    "end_attempt",
+                    "Stop this attempt without claiming task success, if you choose not to continue recovery. "
+                    "Does not reset, retry, or alter native scoring. This is optional, not an automatic failure rule.",
+                    {"reason": text},
+                    ["reason"],
+                ),
+                schema(
                     "done",
-                    "End attempt when believed complete; evaluator separately checks native success.",
+                    "Claim completion; native success feedback may reject it and allow recovery. "
+                    "Use end_attempt instead to stop without a success claim.",
                     {"summary": text},
                     ["summary"],
                 ),
@@ -427,6 +450,14 @@ class ToolRegistry:
                 for s in specs
                 if s["function"]["name"] not in ("align_axis", "rotate_toward", "retreat")
             ]
+        actuated = [
+            arm for arm, state in obs["arms"].items() if state.get("gripper_actuated", True)
+        ]
+        for spec in specs:
+            if spec["function"]["name"] == "set_gripper":
+                spec["function"]["parameters"]["properties"]["arm"]["enum"] = actuated
+        if not actuated:
+            specs = [s for s in specs if s["function"]["name"] != "set_gripper"]
         if self.arrival_guard:
             for spec in specs:
                 if spec["function"]["name"] in ("move_relative", "move_toward", "set_gripper"):
@@ -447,7 +478,25 @@ class ToolRegistry:
         # Low-level servo duration is not a VLM planning variable. Keep explicit
         # programmatic overrides for diagnostics, but expose only metric actions.
         for spec in specs:
-            spec["function"]["parameters"]["properties"].pop("steps", None)
+            if (
+                spec["function"]["name"] == "done"
+                and self.completion_protocol.mode == "submission_only"
+            ):
+                spec["function"]["description"] = (
+                    "Submit your final completion claim and end this attempt. "
+                    "No environment success judgement is returned. Use end_attempt to stop without a success claim."
+                )
+            properties = spec["function"]["parameters"]["properties"]
+            if "camera" in properties and "frame_id" in properties:
+                properties["snapshot_id"] = {
+                    "type": "string",
+                    "description": "Optional exact sensor reference from a previous tool receipt; mismatches require reobservation.",
+                }
+            # A deliberate wait is different from a metric motion's internal
+            # servo budget. Removing its required duration made hold impossible
+            # to call while additionalProperties=False.
+            if spec["function"]["name"] != "hold":
+                spec["function"]["parameters"]["properties"].pop("steps", None)
             spec["function"]["parameters"]["properties"]["decision_note"] = {
                 "type": "string",
                 "description": "For each decision, provide <THINK>brief current visual/tool evidence; target ID and uncertainty; reason for the chosen tool/action; expected observable change</THINK>. Report your decision rationale, not assumed success.",
@@ -456,11 +505,56 @@ class ToolRegistry:
                 spec["function"]["description"] = (
                     "Propose grasps for a CURRENT measured target region using an optional learned point-cloud model, without requiring a long axis. Returns candidate IDs, nominal robot TCP pose hypotheses, and a schematic on the original camera image. Evaluate each option independently using the original views, target identity, visible jaw fit and approach direction; you may reject all candidates. No action, IK, path or grasp certificate. Open jaws, choose clearance, execute bounded moves."
                 )
+        for spec in specs:
+            params = spec["function"]["parameters"]
+            if spec["function"]["name"] == "move_toward":
+                spec["function"]["description"] = (
+                    'Choose exactly ONE target: prefer target_point={point_id:"P…",offset_world_m:{dx,dy,dz}} '
+                    "for a CURRENT visible measured/tracked surface, avoiding copying XYZ. Offset is WORLD meters, "
+                    "must be deliberately chosen for the TCP (surface is not a grasp pose). Lost/stale points "
+                    "cannot be used as current evidence. Alternatively target_xyz_world_m={x,y,z} is an "
+                    "explicit absolute world TCP position with named axes. Never submit both. "
+                    + spec["function"]["description"].replace(
+                        "supply target_xyz_world_m, NOT a relative delta.",
+                        "resolve the selected absolute target once; do not chase a moving feature.",
+                    )
+                )
+            if not set(params.get("required", [])) <= set(params.get("properties", {})):
+                raise ValueError(
+                    "Invalid tool schema: undeclared required parameters in "
+                    + spec["function"]["name"]
+                )
+        if not self.grasp_provider:
+            # A new robot must not inherit Panda's assumed geometry or advertise
+            # a candidate tool which can only fail for missing calibration.
+            available = [
+                arm
+                for arm, state in obs["arms"].items()
+                if all(
+                    key in state.get("geometry", {})
+                    for key in ("axes_local", "sweep_probes_local_m", "finger_pad_centers_local_m")
+                )
+            ]
+            specs = [s for s in specs if s["function"]["name"] != "grasp_candidates" or available]
+            for spec in specs:
+                if spec["function"]["name"] == "grasp_candidates":
+                    spec["function"]["parameters"]["properties"]["arm"]["enum"] = available
         return specs
 
     def execute(self, name, args, obs):
         # Explanation metadata never becomes an actuator/perception argument.
         args = {k: v for k, v in args.items() if k != "decision_note"}
+        resolved_target = None
+        if name == "move_toward":
+            # Validate before any target-memory mutation or native action.
+            target, resolved_target = resolve_point_target(
+                args, obs, self.tracked_points, self.points
+            )
+            args = {k: v for k, v in args.items() if k != "target_point"}
+            args["target_xyz_world_m"] = target.tolist()
+        sensor_reference = (
+            validate_reference(args, obs) if "camera" in args and "frame_id" in args else None
+        )
         before = None
         if self.advisory_controls and args.get("arm") in obs["arms"]:
             arm = args["arm"]
@@ -472,6 +566,10 @@ class ToolRegistry:
                 "meaning": "Pre-action robot target residuals, NOT object arrival or grasp evidence. You may change plan without an override. Check current contact/placement evidence before closing or releasing.",
             }
         result = self._execute(name, args, obs)
+        if resolved_target is not None and isinstance(result, dict):
+            result["resolved_target"] = resolved_target
+        if sensor_reference is not None and isinstance(result, dict):
+            result["sensor_reference"] = sensor_reference
         if before is not None and isinstance(result, dict):
             result["pre_action_target_advisory"] = before
         return result
@@ -506,22 +604,54 @@ class ToolRegistry:
         if name == "remember":
             self.memory[args["key"]] = args["value"]
             return {"saved": args["key"]}
+        if name == "read_guidance":
+            from .guidance import read_guidance
+
+            return read_guidance(args["topic"])
+        if name == "end_attempt":
+            reason = args.get("reason")
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError("end_attempt requires a non-empty reason")
+            return {
+                "stop_requested": True,
+                "termination": "model_ended_attempt",
+                "reason": reason,
+                "success_claimed": False,
+                "meaning": "Attempt ended by model choice. Native evaluation determines success independently.",
+            }
         if name == "done":
             if self.completion_feedback:
-                success = bool(self.adapter.success())
-                check = {"frame_id": obs["frame_id"], "native_success": success}
+                check, reused = self.completion_protocol.check(self.adapter, obs)
+                success = check["native_success"]
                 self.completion_checks.append(check)
                 return {
                     "stop_requested": success,
                     "summary": args["summary"],
                     "completion_check": check,
+                    "completion_check_reused": reused,
                     "feedback": "Environment confirms task success."
                     if success
-                    else "Environment has NOT judged the task successful. Your completion claim was rejected. Reobserve the current views and continue correcting or retrying within the remaining budgets. No hidden failure reason or target coordinates are supplied.",
+                    else "Environment has NOT judged the task successful. Your completion claim was rejected. Reobserve and choose recovery within remaining budgets, or use end_attempt if you choose to stop without success. Repeating done without new evidence does not change the outcome. No hidden failure reason or target coordinates are supplied.",
                 }
-            return {"stop_requested": True, "summary": args["summary"]}
+            return {"stop_requested": True, "submitted": True, "summary": args["summary"]}
         if args.get("frame_id") != obs["frame_id"]:
             raise ValueError("Stale request; use CURRENT frame_id")
+        if name == "hold":
+            from .waiting import hold_current
+
+            return hold_current(self.adapter, obs, args["steps"])
+        if name == "move_relative":
+            from .waiting import is_zero_relative
+
+            if is_zero_relative(args, obs):
+                return dict(
+                    status="no_op",
+                    native_steps=0,
+                    frame_id=obs["frame_id"],
+                    executed=False,
+                    meaning="No translation, rotation or gripper command change requested. "
+                    "No native command sent, no target replaced, and no new sensor evidence. Use hold to advance time.",
+                )
         if name == "align_region_references":
             if not self.regions.enabled:
                 raise ValueError("Region tools disabled")
@@ -641,7 +771,11 @@ class ToolRegistry:
                     is True
                 ):
                     break
-                if current["frame_id"] >= self.adapter.horizon or self.adapter.success():
+                if (
+                    current["frame_id"] >= self.adapter.horizon
+                    or policy_success(self.adapter)
+                    or native_terminated(self.adapter)
+                ):
                     break
             if args.get("release_override_reason") or args.get("close_override_reason"):
                 self.waypoints.pop(args["arm"], None)
@@ -658,8 +792,12 @@ class ToolRegistry:
             uv = pixel_points([args["uv"]], camera["color"].shape, args["coordinate_space"])[0]
             result = unproject(camera, uv)
             result.update(
-                id=f"P{len(self.points) + 1}", frame_id=obs["frame_id"], camera=args["camera"]
+                id=f"P{len(self.points) + 1}",
+                frame_id=obs["frame_id"],
+                camera=args["camera"],
+                sensor_reference=validate_reference(args, obs),
             )
+            result["position_world_m"] = dict(zip(("x", "y", "z"), result["xyz_world_m"]))
             result["delta_from_tcp_m"] = {
                 arm: (np.array(result["xyz_world_m"]) - state["xyz_world_m"]).tolist()
                 for arm, state in obs["arms"].items()
@@ -673,16 +811,15 @@ class ToolRegistry:
         if name == "inspect_crop":
             camera = obs["vision"][args["camera"]]
             h, w = camera["color"].shape[:2]
-            roi = np.asarray(args["roi"], float)
-            if roi.shape != (4,) or not np.isfinite(roi).all():
-                raise ValueError("Expected finite ROI")
-            x0, y0, x1, y1 = roi.astype(int)
-            if not 0 <= x0 < x1 <= w or not 0 <= y0 < y1 <= h:
-                raise ValueError("Crop outside image")
-            self.crop = cv2.resize(camera["color"][y0:y1, x0:x1], (384, 384))
+            x0, y0, x1, y1 = roi_rectangle(args["roi"], camera["color"].shape)
+            scale = 384 / max(x1 - x0, y1 - y0)
+            size = (max(1, round(scale * (x1 - x0))), max(1, round(scale * (y1 - y0))))
+            self.crop = cv2.resize(camera["color"][y0:y1, x0:x1], size)
+            self.crop_caption = f"CURRENT {args['camera']} crop, frame {obs['frame_id']}, original ROI {roi_receipt([x0, y0, x1, y1])}. Aspect ratio preserved. Measure in original pixels."
             return {
                 "origin_uv": [int(x0), int(y0)],
-                "scale_xy": [384 / (x1 - x0), 384 / (y1 - y0)],
+                "roi_pixels": roi_receipt([x0, y0, x1, y1]),
+                "scale_xy": [size[0] / (x1 - x0), size[1] / (y1 - y0)],
                 "frame_id": obs["frame_id"],
             }
         if name == "move_toward":
@@ -708,9 +845,16 @@ class ToolRegistry:
             ):
                 self.waypoints.pop(args["arm"], None)
             return result
-        return self.perception.execute(
+        result = self.perception.execute(
             name, args, {"vision": obs["vision"]}, obs["frame_id"], self.points
         )
+        if name == "fit_geometry":
+            from .geometry_receipt import render
+
+            self.crop, alignment = render(obs, args["camera"], result)
+            self.crop_caption = f"CURRENT geometry on ORIGINAL {args['camera']}, frame {obs['frame_id']}. Yellow actual ROI; cyan unsigned fitted axis; magenta hand approach. Not a new view, identity or grasp score."
+            result["current_hand_axis_comparison"] = alignment
+        return result
 
 
 SYSTEM = """You operate a robot using ONLY current RGB-D tools, proprioception and remembered evidence.
@@ -753,20 +897,41 @@ def run_agent(
     move_toward_max_steps=120,
     move_toward_stall_steps=24,
     move_toward_tolerance_m=0.003,
+    observer_hand_advice=True,
+    history_image_selection="decisions",
+    completion_mode=None,
+    max_output_tokens=None,
+    truncation_max_output_tokens=7200,
     registry_class=None,
     client_factory=None,
     request_options=None,
 ):
+    from .output_budget import default_output_budget
+
+    if max_output_tokens is None:
+        max_output_tokens = default_output_budget(model)
+    output_budget = OutputBudget(max_output_tokens, truncation_max_output_tokens)
+    completion_mode = resolve_mode(completion_mode, completion_feedback)
+    completion_feedback = completion_mode == "feedback"
+    bimanual_guidance(observer_hand_advice)  # validate even in a single-arm episode
     delta_axis = axis_limit(delta_axis)
     reach_config(move_toward_max_steps, move_toward_stall_steps, move_toward_tolerance_m)
     nonnegative_integer(history_rounds, "history_rounds")
     nonnegative_integer(history_image_rounds, "history_image_rounds")
+    validate_image_history_selection(history_image_selection)
     if max_calls < 1:
         raise ValueError("max_calls must be positive")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     # Refuse an existing episode rather than overwriting its full evidence.
-    for filename in ("agent.jsonl", "episode_history.jsonl", "task_progress.jsonl", "result.json"):
+    for filename in (
+        "agent.jsonl",
+        "episode_history.jsonl",
+        "task_progress.jsonl",
+        "result.json",
+        "gripper_events.jsonl",
+        "gripper_samples.jsonl",
+    ):
         if (output / filename).exists():
             raise FileExistsError(f"Use a fresh episode directory: {output / filename}")
     registry = (registry_class or ToolRegistry)(
@@ -780,17 +945,28 @@ def run_agent(
         grasp_provider=grasp_provider,
         interaction_feedback=interaction_feedback,
         completion_feedback=completion_feedback,
+        completion_mode=completion_mode,
         delta_axis=delta_axis,
         move_toward_max_steps=move_toward_max_steps,
         move_toward_stall_steps=move_toward_stall_steps,
         move_toward_tolerance_m=move_toward_tolerance_m,
     )
     registry.episode_history = EpisodeHistory(output)
+    registry.gripper_monitor.set_journal(output / "gripper_events.jsonl")
     registry.task_progress = TaskProgress(output, adapter.observe()["instruction"])
     system = SYSTEM
+    system += "\nGripper receipts distinguish measured metric gap, measured normalized joint opening, and unavailable data. Gripper events are timestamped proprioceptive changes, not verdicts about attachment or task failure. They never stop a motion or change the gripper command. Check current images and decide whether to continue or recover; a blocked closure can be normal object contact. Old events in history are not new events.\n"
+    if len(adapter.observe()["arms"]) > 1:
+        system += "\n" + bimanual_guidance(observer_hand_advice) + "\n"
+    system += "\nUse done to claim task completion; use end_attempt to stop an unsuccessful attempt by choice. Never confuse ending an attempt with achieving its objective.\n"
+    history_source = (
+        "model decisions"
+        if history_image_selection == "decisions"
+        else "distinct earlier physical states (latest archived camera set for each state)"
+    )
     system += (
         f"\nEpisode memory: the prompt retains the latest {history_rounds} complete text tool exchanges "
-        f"and camera images from the previous {history_image_rounds} model decisions, plus CURRENT images. "
+        f"and camera images from the previous {history_image_rounds} {history_source}, plus CURRENT images. "
         "Historical images carry their call/frame/camera labels; same-frame comparisons contain no new sensor time. "
         "Camera motion and changed overlays may explain differences, not only object motion. Never treat historical "
         "coordinates/visibility as current. All completed decisions remain saved: search_history searches them, "
@@ -826,12 +1002,15 @@ def run_agent(
         system += "\nWhen transporting a grasped object, its visible reference may be centimeters away from the TCP. Do not equate TCP-over-destination with object-over-destination. Use align_region_references on CURRENT intended source/destination regions to compute an offset-compensated translation hypothesis. Choose the desired source-reference offset explicitly; align x,y first if maintaining height is appropriate, then reobserve and choose vertical motion using measured surfaces and clearance. Surface statistics are not full object centers. This requires rigid co-motion and unchanged orientation; lost regions, changed contact or inconsistent correspondence require reinspection, not copying a stale target. Execute with move_to_pose and recheck the actual object relation before release or done.\n"
     if completion_feedback:
         system += "\nCompletion feedback is enabled: calling done requests a sparse environment success check. If it reports failure, the episode continues; reobserve and correct instead of merely repeating done. The check provides only a task-success boolean, never hidden coordinates or predicate thresholds. Every request consumes model-call budget.\n"
+    elif completion_mode == "submission_only":
+        system += "\nCompletion protocol is submission_only: done submits your final completion claim and ends this attempt. No task-success judgement is returned to you. Judge progress from current images and measured robot/tool evidence; host evaluation is recorded separately after the attempt. A native environment may terminate independently.\n"
     system += "\nDecision authority: target arrival, sparse sweep and low-progress evidence are ADVISORY, not vetoes. Choose to continue, reduce motion, change target, observe or retreat. No override reason is required. Keep intended contact distinct from obstacle contact; these estimates cannot certify safety or attachment. Before retrying, state what observable change you expect in the tool note. Identical-frame crops/searches provide no new sensor evidence; use current region geometry, another existing view or a purposeful small probe when appropriate. Do not confuse grasp confidence or co-motion with a verified grasp.\n"
     history = []
     system += "\nFor EVERY tool call, include decision_note='<THINK>...</THINK>': a concise decision rationale grounded in the CURRENT images and tool receipts. Identify the intended S/P target and why its visible location/shape matches the instruction when relevant; distinguish observations from assumptions; explain the chosen action and expected observable change. After failure, say what evidence changes your next decision. Do not repeat generic warnings, invent evidence, or treat the rationale as proof of success. THINK delimiters are text markers, not a separate hidden reasoning channel.\n"
     started = time.time()
     stopped = False
     errors = 0
+    tool_execution_errors = missing_tool_calls = 0
     llm_calls = 0
     last_frame = -1
     stationary_calls = 0
@@ -842,7 +1021,11 @@ def run_agent(
         (output / "agent.jsonl").open("w") as log,
     ):
         for call_id in range(max_calls):
-            if adapter.success() or adapter.frame >= adapter.horizon:
+            if (
+                policy_success(adapter)
+                or native_terminated(adapter)
+                or adapter.frame >= adapter.horizon
+            ):
                 break
             obs = registry.observe()
             registry.current_call_id = call_id
@@ -882,19 +1065,22 @@ def run_agent(
                 gripper_feedback=registry.gripper_context(obs),
                 calls_remaining=max_calls - call_id,
                 steps_remaining=adapter.horizon - adapter.frame,
-                unchanged_state_perception_calls_remaining=max(
-                    0, perception_budget - stationary_calls
-                ),
             )
+            pending_gripper_events = registry.gripper_monitor.drain_events()
+            if pending_gripper_events:
+                context["gripper_events"] = pending_gripper_events
             if interaction_feedback:
                 context["target_hand_motion_evidence"] = registry.interaction_evidence.context()
-                context["persistent_gripper_evidence"] = registry.gripper_evidence.context()
             if completion_feedback and registry.completion_checks:
                 context["last_requested_completion_check"] = registry.completion_checks[-1]
             # Freeze the actual decision input before tool execution mutates memory/feedback.
             if arrival_guard:
                 context["arrival"] = registry.arrival_context(obs)
-            from .feedback_presentation import actor_feedback
+            if getattr(registry, "single_motion_feedback", False):
+                # Root observation feedback is the current adapter receipt. The
+                # motion-controller cache can describe an older tool invocation.
+                context["motion"].pop("feedback", None)
+            from .feedback_presentation import actor_feedback, PRESENTATION_VERSION
 
             diagnostic_context = json.loads(json.dumps(context))
             context = actor_feedback(diagnostic_context)
@@ -940,8 +1126,13 @@ def run_agent(
                     ]
                 )
             current_camera_count = len(obs["vision"])
+            history_image_call_ids = registry.episode_history.recent_image_call_ids(
+                history_image_rounds, obs["frame_id"], history_image_selection
+            )
             content.extend(
-                registry.episode_history.recent_image_blocks(history_image_rounds, obs["frame_id"])
+                registry.episode_history.recent_image_blocks(
+                    history_image_rounds, obs["frame_id"], history_image_selection
+                )
             )
             content.extend(registry.retrieved_history_images)
             # Retrieved images are a one-input response, not a persistent panel.
@@ -996,7 +1187,7 @@ def run_agent(
                 "tools": available,
                 "tool_choice": "required",
                 "temperature": 0.2,
-                "max_tokens": 1800,
+                "max_tokens": output_budget.current,
             }
             if request_options:
                 if set(request_options) - {"provider", "seed"}:
@@ -1046,21 +1237,28 @@ def run_agent(
                 "finish_reason": body["choices"][0].get("finish_reason"),
                 "seconds": time.time() - t,
                 "usage": body.get("usage"),
+                "request_max_output_tokens": request["max_tokens"],
                 "context": context,
                 "diagnostic_context": diagnostic_context,
-                "feedback_presentation": "compact",
+                "feedback_presentation": PRESENTATION_VERSION,
                 "stationary_calls": stationary_calls,
                 "available_tools": [s["function"]["name"] for s in available],
                 "history_rounds": history_rounds,
                 "history_image_rounds": history_image_rounds,
+                "history_image_selection": history_image_selection,
+                "history_image_source_call_ids": history_image_call_ids,
                 "current_camera_count": current_camera_count,
                 "image_manifest": image_manifest,
-                "algorithm": "robo-harness k1",
+                "harness_version": HARNESS_VERSION,
+                "observer_hand_advice": observer_hand_advice,
                 "delta_axis": delta_axis,
                 "history_tool_calls": sum(
                     m.get("role") == "assistant" and bool(m.get("tool_calls")) for m in messages
                 ),
             }
+            recovery = output_budget.after_response(row["finish_reason"], bool(calls))
+            if recovery is not None:
+                row["output_budget_recovery"] = recovery
             results = []
             # Execute one call per request. Multiple proposed calls cannot use future frames.
             if calls:
@@ -1083,8 +1281,15 @@ def run_agent(
                     args = json.loads(call["function"]["arguments"])
                     result = registry.execute(name, args, obs)
                 except (ValueError, KeyError, TypeError, RuntimeError) as exc:
+                    from .resource_errors import raise_if_infrastructure_error
+
+                    raise_if_infrastructure_error(exc)
                     result = {"error": str(exc)}
                     errors += 1
+                    tool_execution_errors += 1
+                gripper_events = registry.gripper_monitor.drain_events()
+                if gripper_events:
+                    result["gripper_events"] = gripper_events
                 results.append({"name": name, "result": result})
                 history.extend(
                     [
@@ -1110,11 +1315,28 @@ def run_agent(
                         },
                     ]
                 )
-                stopped = name == "done" and bool(result.get("stop_requested", False))
+                stopped = name in {"done", "end_attempt"} and bool(
+                    result.get("stop_requested", False)
+                )
             else:
                 errors += 1
+                missing_tool_calls += 1
+                row["response_error"] = dict(
+                    kind="missing_tool_call",
+                    finish_reason=row["finish_reason"],
+                    native_command_sent=False,
+                )
                 history.append(
-                    {"role": "user", "content": "No tool call received. Select a tool now."}
+                    {
+                        "role": "user",
+                        "content": (
+                            "Previous output reached its token limit before a tool call; NO action executed. "
+                            "Select one tool with a concise decision summary. "
+                            f"Next output cap is {output_budget.current} tokens."
+                            if recovery is not None
+                            else "No tool call received. Select a tool now."
+                        ),
+                    }
                 )
             row["results"] = results
             row["model_results"] = actor_feedback(results)
@@ -1134,30 +1356,49 @@ def run_agent(
             )
             if stopped:
                 break
+    final_native_success = bool(adapter.success())  # Host only, after the last model call.
     result = {
-        "algorithm": "robo-harness k1",
+        "harness_version": HARNESS_VERSION,
+        "observer_hand_advice": observer_hand_advice,
         "delta_axis": delta_axis,
         "move_toward_execution": registry.reach_config,
         "history_rounds": history_rounds,
         "history_image_rounds": history_image_rounds,
+        "history_image_selection": history_image_selection,
         "archived_completed_calls": len(registry.episode_history.records),
         "task_progress_revision": registry.task_progress.state["revision"],
         "model_requested": model,
+        "output_token_budget": dict(
+            base=max_output_tokens,
+            truncation_cap=truncation_max_output_tokens,
+            final_cap=output_budget.current,
+            recovery="episode_high_water_mark; next logged requests only; no action replay or extra model calls",
+        ),
         "completion_feedback_enabled": completion_feedback,
+        "completion_mode": completion_mode,
+        "requested_completion_native_queries": registry.completion_protocol.native_queries,
         "completion_checks": len(registry.completion_checks),
         "rejected_completion_checks": sum(
             not x["native_success"] for x in registry.completion_checks
         ),
-        "native_success": adapter.success(),
+        "native_success": final_native_success,
+        "gripper_monitor": registry.gripper_monitor.protocol(),
+        "gripper_event_count": len(registry.gripper_monitor.events),
         "native_steps": adapter.frame,
         "llm_calls": llm_calls,
         "tool_errors": errors,
+        "tool_execution_errors": tool_execution_errors,
+        "missing_tool_calls": missing_tool_calls,
         "stop_requested": stopped,
         "elapsed_seconds": time.time() - started,
         "termination": "native_success"
-        if adapter.success()
+        if final_native_success
+        else "model_ended_attempt"
+        if stopped and name == "end_attempt"
         else "model_done"
         if stopped
+        else "native_episode_ended"
+        if native_terminated(adapter)
         else "budget",
     }
     (output / "result.json").write_text(json.dumps(result, indent=2))

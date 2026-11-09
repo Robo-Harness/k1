@@ -21,17 +21,21 @@ def step_axis_limit(args, maximum):
     return limit
 
 
-def bounded_translation(delta, limit, distance_cap=None):
+def bounded_translation(delta, limit, legacy_distance=None, *, distance_cap=None):
     """Uniform scaling preserves the straight approach direction, unlike per-axis clipping.
 
     max_distance_m remains an explicit Euclidean cap for old programmatic callers,
     but is no longer exposed in the model schema. New callers use delta_axis.
     """
+    if distance_cap is not None:
+        if legacy_distance is not None:
+            raise ValueError("Specify only one distance cap")
+        legacy_distance = distance_cap
     limit = axis_limit(limit)
     delta = finite_vector(delta, 3)
     scale = min(1.0, limit / max(float(np.max(np.abs(delta))), 1e-12))
-    if distance_cap is not None:
-        distance = axis_limit(distance_cap)
+    if legacy_distance is not None:
+        distance = axis_limit(legacy_distance)
         if distance > limit:
             raise ValueError(f"Legacy max_distance_m must be in (0, {limit:g}]")
         scale = min(scale, distance / max(float(np.linalg.norm(delta)), 1e-12))

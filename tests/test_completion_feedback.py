@@ -12,7 +12,9 @@ from test_portable_harness import scene
     "enabled,success_on_request,expected_calls,termination,rejections",
     [
         (False, None, 1, "model_done", 0),
-        (True, 2, 2, "native_success", 1),
+        # The synthetic truth changes without a new sensor snapshot: reuse the
+        # previous completion receipt, then host scoring sees the changed truth.
+        (True, 2, 2, "native_success", 2),
         (True, None, 3, "budget", 3),
     ],
 )

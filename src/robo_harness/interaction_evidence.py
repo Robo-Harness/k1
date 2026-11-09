@@ -4,9 +4,12 @@ Uses matched visible RGB-D anchors, not changing segmentation centroids. No
 attachment, contact, object identity, or task completion certificates are given.
 """
 
+from copy import deepcopy
+
 import numpy as np
 
 from .geometry import calibration
+from .observation_contract import camera_reference
 
 
 def measured_anchors(entry, obs):
@@ -14,11 +17,16 @@ def measured_anchors(entry, obs):
     track = entry["track"]
     uv = np.asarray(track["points_uv"], float)
     valid = np.asarray(track["visible"], bool) & ~np.asarray(track["needs_revalidation"], bool)
+    if uv.ndim != 2 or uv.shape[1] != 2 or valid.shape != (len(uv),):
+        raise ValueError("Malformed tracked anchors")
     h, w = camera["color"].shape[:2]
     valid &= np.isfinite(uv).all(axis=1) & (uv >= 0).all(axis=1) & (uv < [w - 1, h - 1]).all(axis=1)
     indices = np.where(valid)[0]
     pixels = np.rint(uv[indices]).astype(int)
-    depth = np.asarray(camera["depth"]).squeeze()[pixels[:, 1], pixels[:, 0]]
+    depth_image = np.asarray(camera["depth"]).squeeze()
+    if depth_image.shape != (h, w):
+        raise ValueError("Depth is not aligned with tracked RGB")
+    depth = depth_image[pixels[:, 1], pixels[:, 0]]
     good = np.isfinite(depth) & (depth > 0) & (depth < 10)
     indices, pixels, depth = indices[good], pixels[good], depth[good]
     k, pose = calibration(camera)
@@ -33,6 +41,13 @@ def compare_anchors(before, after, previous_arms, current_arms):
         return {"status": "unknown", "reason": "fewer_than_three_matched_depth_anchors"}
     old = np.array([before[i] for i in common])
     new = np.array([after[i] for i in common])
+    if (
+        old.shape != (len(common), 3)
+        or new.shape != old.shape
+        or not np.isfinite(old).all()
+        or not np.isfinite(new).all()
+    ):
+        return {"status": "unknown", "reason": "invalid_matched_world_anchors"}
     displacements = new - old
     delta = np.median(displacements, axis=0)
     scatter = float(np.median(np.linalg.norm(displacements - delta, axis=1)))
@@ -48,8 +63,23 @@ def compare_anchors(before, after, previous_arms, current_arms):
     }
     for arm in set(previous_arms) & set(current_arms):
         p, c = previous_arms[arm], current_arms[arm]
-        old_tcp, new_tcp = np.asarray(p["xyz_world_m"]), np.asarray(c["xyz_world_m"])
-        relative_rotation = np.asarray(c["axes_world"]) @ np.asarray(p["axes_world"]).T
+        try:
+            old_tcp, new_tcp = [np.asarray(s["xyz_world_m"], float) for s in (p, c)]
+            old_r, new_r = [np.asarray(s["axes_world"], float) for s in (p, c)]
+            if any(v.shape != (3,) or not np.isfinite(v).all() for v in (old_tcp, new_tcp)):
+                raise ValueError("Invalid TCP position")
+            if any(
+                r.shape != (3, 3)
+                or not np.isfinite(r).all()
+                or not np.allclose(r.T @ r, np.eye(3), atol=1e-5, rtol=0)
+                or not np.isclose(np.linalg.det(r), 1.0, atol=1e-5, rtol=0)
+                for r in (old_r, new_r)
+            ):
+                raise ValueError("Invalid TCP rotation")
+        except (KeyError, TypeError, ValueError):
+            result["relative_to_hands"][arm] = {"status": "unknown", "reason": "invalid_robot_pose"}
+            continue
+        relative_rotation = new_r @ old_r.T
         predicted = (old - old_tcp) @ relative_rotation.T + new_tcp
         expected = float(np.median(np.linalg.norm(predicted - old, axis=1)))
         residual = float(np.median(np.linalg.norm(new - predicted, axis=1)))
@@ -77,21 +107,46 @@ class InteractionEvidence:
                 self.latest[key] = {"status": "unknown", "reason": "tracking_not_current"}
                 continue
             prior = self.previous.get(key)
-            if prior and prior["frame"] == obs["frame_id"] and prior["entry"] is entry:
+            reference = camera_reference(obs, entry["camera"])
+            if entry.get("track_sensor_snapshot_id") != reference["snapshot_id"]:
+                self.previous.pop(key, None)
+                self.latest[key] = {
+                    "status": "unknown",
+                    "reason": "tracking_sensor_reference_mismatch",
+                }
                 continue
-            points = measured_anchors(entry, obs)
+            if prior and prior["frame"] == obs["frame_id"] and prior["entry"] is entry:
+                if prior["reference"] == reference:
+                    continue
+                self.previous.pop(key, None)
+                self.latest[key] = {
+                    "status": "unknown",
+                    "reason": "sensor_changed_without_frame_advance",
+                }
+                continue
+            try:
+                points = measured_anchors(entry, obs)
+            except (KeyError, ValueError, TypeError):
+                self.previous.pop(key, None)
+                self.latest[key] = {
+                    "status": "unknown",
+                    "reason": "invalid_anchor_depth_measurement",
+                }
+                continue
             result = {"status": "unknown", "reason": "need_another_physical_frame"}
-            if prior and prior["entry"] is entry:
+            if prior and prior["entry"] is entry and prior["frame"] < obs["frame_id"]:
                 result = compare_anchors(prior["points"], points, prior["arms"], obs["arms"])
                 result["from_frame_id"] = prior["frame"]
             result["to_frame_id"] = obs["frame_id"]
+            result["sensor_reference"] = reference
             self.latest[key] = result
             self.previous[key] = {
                 "entry": entry,
                 "frame": obs["frame_id"],
-                "points": points,
-                "arms": obs["arms"],
+                "points": deepcopy(points),
+                "arms": deepcopy(obs["arms"]),
+                "reference": reference,
             }
 
     def context(self):
-        return self.latest.copy()
+        return deepcopy(self.latest)

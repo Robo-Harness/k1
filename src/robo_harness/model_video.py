@@ -3,6 +3,7 @@
 import json
 import re
 import subprocess
+import os
 from pathlib import Path
 
 import cv2
@@ -33,7 +34,7 @@ def make_model_video(output):
     if destination.exists():
         raise FileExistsError(destination)
     command = [
-        "ffmpeg",
+        os.environ.get("ROBO_HARNESS_FFMPEG", "ffmpeg"),
         "-n",
         "-loglevel",
         "error",

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "robo-harness-k1"
-version = "0.1.0"
+version = "1.1.0"
 description = "robo-harness k1: tool-augmented visual robot control"
 readme = "README.md"
 license = {file = "LICENSE"}

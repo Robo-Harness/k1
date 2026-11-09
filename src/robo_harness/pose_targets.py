@@ -33,6 +33,19 @@ class PoseTargets:
             }
         return result
 
+    def record_external(self, arm, xyz, quaternion_xyzw):
+        """Remember an already validated absolute command without executing it.
+
+        New commands supersede only this arm's active goal. No arrival gate.
+        """
+        xyz = finite_vector(xyz, 3)
+        target = rotation({"quaternion_xyzw": quaternion_xyzw})
+        self.counter += 1
+        key = f"T{self.counter}"
+        self.goals[key] = {"xyz": xyz.copy(), "rotation": target, "arm": arm}
+        self.active[arm] = key
+        return key
+
     def step(self, obs, args):
         resolution = None
         if (
@@ -48,7 +61,7 @@ class PoseTargets:
         arm = args["arm"]
         limit = step_axis_limit(args, self.motion.delta_axis)
         angle_limit = float(args.get("max_degrees", 15))
-        # Validate optional distance caps before registering a new persistent target.
+        # Validate legacy optional caps before registering a new persistent target.
         bounded_translation([0, 0, 0], limit, args.get("max_distance_m"))
         if not np.isfinite(angle_limit) or not 0 < angle_limit <= 15:
             raise ValueError("Rotation step limit must be in (0, 15]")

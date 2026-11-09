@@ -118,7 +118,10 @@ def test_multieffector_dispatch_and_stale_frame():
     dispatched = []
     adapter = SimpleNamespace(
         observe=lambda: obs,
-        move_effectors=lambda t, s: dispatched.append((t, s)) or {"simultaneous": True},
+        move_effectors=lambda t, s: (
+            dispatched.append((t, s))
+            or {"simultaneous": True, "arms": {target["arm"]: {} for target in t}}
+        ),
     )
     registry = MultiEffectorRegistry(adapter)
     assert "move_effectors" in {s["function"]["name"] for s in registry.schemas(obs)}
@@ -128,6 +131,7 @@ def test_multieffector_dispatch_and_stale_frame():
         "steps": 4,
     }
     assert registry.execute("move_effectors", args, obs)["simultaneous"]
+    assert registry.pose_targets.active["left"]
     with pytest.raises(ValueError):
         registry.execute("move_effectors", {**args, "frame_id": 5}, obs)
     assert len(dispatched) == 1
