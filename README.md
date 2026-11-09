@@ -26,10 +26,8 @@ This release supports **LIBERO-Pro** and **RoboSuite**, with optional interfaces
 
 ## News and updates
 
-- **2026-11-09 · v1.1:** More reliable measurement references and motion receipts; calibrated multi-effector control; explicit gripper uncertainty and change monitoring; configurable physical-state image history; bounded output-truncation recovery; and an explicit `submission_only` protocol that separates model completion from evaluator-only scoring. See the [upgrade guide](docs/releases/v1.1.md).
+- **2026-11-09 · v1.1:** Updated the shared harness for cross-environment and cross-embodiment use, including single- and dual-arm control, more reliable perception references, gripper monitoring, physical-state image history, and bounded output-truncation recovery. Environment integration work now covers **LIBERO-Pro, RoboSuite, RoboCasa, RoboTwin, RoboDojo, and RoboLab**. LIBERO-Pro and RoboSuite adapters are included in this repository; the other four adapter integrations are pending public release. See the [upgrade guide](docs/releases/v1.1.md).
 - **v1.0 archive:** The previous main branch is preserved at [v1.0](https://github.com/Robo-Harness/k1/tree/v1.0). Use that snapshot for the original public implementation.
-
-The figures below report the published experiments, **not a new benchmark of v1.1**. Completion protocols are part of the evaluation setting and must be reported; oracle-assisted and submission-only results are not interchangeable.
 
 ## Results
 
