@@ -70,7 +70,7 @@ Gemini + K1 also transfers to **Aloha AgileX dual arms in RoboTwin** and the **P
 
 RoboTwin tests coordinated manipulation under changes in lighting, textures, clutter, and table height. RoboCasa extends the interface to base motion and torso height. [Task coverage and results →](docs/results.md#robotwin-and-robocasa-transfer)
 
-### Real-robot manipulation
+### Real-World Robot Experiments
 
 A physical **Piper arm** uses two external RGB-D cameras to perform can placement, bowl placement, and two-object sorting. Each method has three concluded trials per task.
 
@@ -87,7 +87,7 @@ A physical **Piper arm** uses two external RGB-D cameras to perform can placemen
 | Two-object sorting | 0/3 · 0.0% | **3/3 · 100.0%** |
 | **Overall** | **1/9 · 11.1%** | **8/9 · 88.9%** |
 
-Both methods request Gemini 3.7 Flash and share the Piper control adapter. Outcomes are manually assessed. [Scoring and execution settings →](docs/results.md#real-robot-manipulation)
+Both methods request Gemini 3.7 Flash and share the Piper control adapter. Outcomes are manually assessed. [Scoring and execution settings →](docs/results.md#real-world-robot-experiments)
 
 ### Agentic post-training
 

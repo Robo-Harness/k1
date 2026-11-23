@@ -112,7 +112,7 @@ The interface supports arm and gripper control, planar base translation, base ro
 
 Counter-to-sink placement reaches 80% and drawer closing reaches 60%. Microwave activation and coffee-machine button pressing remain unsolved in this evaluation, highlighting the difficulty of precise appliance contact.
 
-## Real-robot manipulation
+## Real-World Robot Experiments
 
 The physical setup uses a Piper arm, a parallel-jaw gripper, and two external RGB-D cameras. Both methods request Gemini 3.7 Flash. The Clean baseline uses RGB observations, measured arm pose, and four tools: `capture_scene`, `move`, `hold`, and `finish`. K1 adds perceptual tools and structured history with the same robot-control and IK adapters.
 
