@@ -18,11 +18,12 @@ PATTERNS = {
 }
 ALLOWED_SUFFIXES = {".py", ".md", ".toml", ".yaml", ".yml", ".txt", ".example"}
 ALLOWED_NAMES = {"LICENSE", ".gitignore", "MANIFEST.in"}
-# Only reviewed documentation images are allowed, not arbitrary binary artifacts.
+# Only reviewed documentation images and the demo GIF are allowed.
 # Replacing an image requires a new content review and checksum update.
 APPROVED_ASSETS = {
-    "assets/frontier-results.png": "e594ab27321726f0067c7d1ec028c388b860ac05822193d781e8a64cd1b95a3b",
-    "assets/learning-curves.png": "6bc34f2f56c46945443a3f5b27bc07d1448fa805357ed23ca5e5a69eba2a5aa2",
+    "assets/frontier-results.png": "6072b7549887d8c9d638c88d5d016d06196a75df5e274135f233c1b1df91c47e",
+    "assets/learning-curves.png": "48b21e2b1a280c6d8e5b661d8c78a9e9e3c9c8d47031d3a3312210186e7faa8c",
+    "assets/real-robot-can-into-bowl.gif": "ed850021d31a8777d6101d23ff58725ec3e6b462d465af5542a561e1c1f6958f",
     "assets/logo.png": "e40e0e5a55a742e84807323b25be375f91deb350b7573cdf3b09583257f405ed",
     "assets/perception-tools.png": "f14005565f00888b923ba200806078cb8bf4c8961857dfbda348cfb958272430",
     "assets/robosuite-transfer.png": "c9291ba41b3e9b7cb1a736bacbddef9dbe4fb9bff6cf0ab8cce9015c044bea32",
